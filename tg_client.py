@@ -820,7 +820,7 @@ class TerminalTelegramTUI:
     def _start_search(self, raw_query: str) -> None:
         query = raw_query.strip()
         if not query:
-            self._set_status("Usage: /s <검색어>")
+            self._set_status("Usage: /s <query>")
             return
 
         self.search_query = query
@@ -838,7 +838,7 @@ class TerminalTelegramTUI:
 
     def _move_search(self, *, older: bool) -> None:
         if not self.search_query or not self.search_match_msg_ids:
-            self._set_status("No active search. Use /s <검색어>.")
+            self._set_status("No active search. Use /s <query>.")
             return
 
         step = -1 if older else 1
@@ -1869,18 +1869,18 @@ class TerminalTelegramTUI:
                 else:
                     guide = (
                         f"SEARCH '{self.search_query}' 0/0 | "
-                        "/s <검색어> | Esc: clear"
+                        "/s <query> | Esc: clear"
                     )
             else:
                 if self.chat_scroll_offset > 0:
                     guide = (
                         "Enter: bottom | "
-                        "Ctrl+E: Select Message | /s <검색어>"
+                        "Ctrl+E: Select Message | /s <query>"
                     )
                 else:
                     guide = (
                         "Ctrl+N: newline | "
-                        "Ctrl+E: Select Message | /s <검색어>"
+                        "Ctrl+E: Select Message | /s <query>"
                     )
             guide_attr = curses.A_REVERSE
             guide_fill = " " * max(0, width - 1)

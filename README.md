@@ -76,7 +76,7 @@ Session is saved as `<TG_SESSION_NAME>.session`.
 - `Ctrl+R`: move selection toward newer sent messages
 - `Ctrl+D`: delete currently selected sent message (with confirm dialog)
 - `Ctrl+G`: cancel edit mode
-- `/s <검색어>`: start search and jump to latest match
+- `/s <query>`: start search and jump to latest match
 - In search mode: `Ctrl+N` / `Ctrl+P` to move through matches
 - In search mode: first `Esc` clears search, second `Esc` returns to dialogs
 - Outgoing messages show `✓` (sent) / `✓✓` (read by peer, mainly 1:1 chats)
