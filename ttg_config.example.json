@@ -1,0 +1,23 @@
+{
+  "timers": {
+    "auto_refresh_interval_sec": 8,
+    "peer_status_refresh_interval_sec": 15,
+    "peer_status_typing_refresh_interval_sec": 3
+  },
+  "history": {
+    "initial_message_limit": 80,
+    "batch_size": 80
+  },
+  "keys": {
+    "newline": "ctrl+n",
+    "search_prev": "ctrl+p",
+    "edit_older": "ctrl+e",
+    "edit_newer": "ctrl+r",
+    "cancel_edit": "ctrl+g",
+    "delete_selected": "ctrl+d"
+  },
+  "logging": {
+    "file": "logs/ttg.log",
+    "level": "INFO"
+  }
+}

@@ -1,0 +1,17 @@
+# Local secrets
+.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Runtime/session files
+logs/
+*.session
+*.session-journal
+
+# Editor temp files
+*.swp
