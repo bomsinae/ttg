@@ -63,8 +63,8 @@ Session is saved as `<TG_SESSION_NAME>.session`.
 ## Controls (TUI)
 
 - App opens in dialog list screen first
-- `j` / `k` or Up / Down: move selection
-- `Enter` or `o`: open selected dialog
+- Up / Down: move selection
+- `Enter`: open selected dialog
 - `Esc`: quit (from dialog list)
 - `r`: refresh dialogs (from dialog list)
 - Chat input area has 2 lines

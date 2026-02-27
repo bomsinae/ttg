@@ -4,7 +4,7 @@ Terminal Telegram third-party client (MTProto) with a simple TUI.
 
 Key flow:
 - Launch -> dialog list appears first
-- j/k (or arrow up/down) to move
+- Arrow up/down to move
 - Enter to open selected dialog
 - In chat view, type and Enter to send
 - Esc to return to dialog list
@@ -385,6 +385,8 @@ class TerminalTelegramTUI:
         self.dialog_refresh_requested = False
         self.last_dialog_refresh = 0.0
         self.info_bar_attr = curses.A_REVERSE
+        self.badge_unread_attr = curses.A_BOLD
+        self.badge_muted_attr = curses.A_DIM
         self.read_outbox_max_by_chat: dict[int, int] = {}
         self.refresh_task: asyncio.Task[Any] | None = None
         self.open_task: asyncio.Task[Any] | None = None
@@ -408,6 +410,8 @@ class TerminalTelegramTUI:
         self.search_match_msg_ids: list[int] = []
         self.search_match_idx = -1
         self.search_focus_msg_id: int | None = None
+        self.other_chat_new_counts: dict[int, int] = {}
+        self.other_chat_names: dict[int, str] = {}
         self.oldest_loaded_msg_id_by_chat: dict[int, int] = {}
         self.history_exhausted_by_chat: dict[int, bool] = {}
         self.history_batch_size = self.config.history_batch_size
@@ -454,8 +458,20 @@ class TerminalTelegramTUI:
                 self.info_bar_attr = curses.color_pair(2)
             except curses.error:
                 self.info_bar_attr = curses.A_REVERSE
+            try:
+                curses.init_pair(3, curses.COLOR_BLUE, -1)
+                self.badge_unread_attr = curses.color_pair(3) | curses.A_BOLD
+            except curses.error:
+                self.badge_unread_attr = curses.A_BOLD
+            try:
+                curses.init_pair(4, curses.COLOR_WHITE, -1)
+                self.badge_muted_attr = curses.color_pair(4) | curses.A_DIM
+            except curses.error:
+                self.badge_muted_attr = curses.A_DIM
         except curses.error:
             self.info_bar_attr = curses.A_REVERSE
+            self.badge_unread_attr = curses.A_BOLD
+            self.badge_muted_attr = curses.A_DIM
 
     def _set_status(self, value: str) -> None:
         self.status = value.replace("\n", " ").strip()
@@ -1002,9 +1018,52 @@ class TerminalTelegramTUI:
             return self.dialogs[self.selected_idx].id
         return None
 
+    def _other_chat_alert_text(self) -> str:
+        if not self.other_chat_new_counts:
+            return ""
+        total_new = sum(
+            count for count in self.other_chat_new_counts.values() if isinstance(count, int)
+        )
+        if total_new <= 0:
+            return ""
+        chat_count = len(self.other_chat_new_counts)
+        if chat_count == 1:
+            chat_id = next(iter(self.other_chat_new_counts))
+            name = self.other_chat_names.get(chat_id, f"id:{chat_id}")
+            return f"Other: {name} +{total_new}"
+        return f"Other chats: {chat_count} (+{total_new})"
+
     def _dialog_rows(self) -> int:
         height, _ = self.stdscr.getmaxyx()
         return max(1, (height - 2) // 3)
+
+    def _is_dialog_muted(self, dialog: Dialog) -> bool:
+        notify = getattr(getattr(dialog, "dialog", None), "notify_settings", None)
+        if notify is None:
+            notify = getattr(getattr(dialog, "entity", None), "notify_settings", None)
+        if notify is None:
+            return False
+
+        # Some peers may expose "silent" instead of an active mute_until window.
+        if getattr(notify, "silent", False) is True:
+            return True
+
+        mute_until = getattr(notify, "mute_until", None)
+        if isinstance(mute_until, datetime):
+            try:
+                if mute_until.tzinfo is None:
+                    return mute_until > datetime.now()
+                return mute_until > datetime.now(mute_until.tzinfo)
+            except Exception:
+                return False
+
+        if isinstance(mute_until, bool) or not isinstance(mute_until, int):
+            return False
+        if mute_until <= 0:
+            return False
+        if mute_until >= 2_000_000_000:
+            return True
+        return mute_until > int(time.time())
 
     def _ensure_dialog_visible(self) -> None:
         rows = self._dialog_rows()
@@ -1031,6 +1090,12 @@ class TerminalTelegramTUI:
             elif chat_id not in self.read_outbox_max_by_chat:
                 self.read_outbox_max_by_chat[chat_id] = prev
 
+            if dialog.unread_count > 0:
+                self.other_chat_names[chat_id] = dialog.name.replace("\n", " ")
+            else:
+                self.other_chat_new_counts.pop(chat_id, None)
+                self.other_chat_names.pop(chat_id, None)
+
         if not self.dialogs:
             self.selected_idx = 0
             self.dialog_top = 0
@@ -1055,6 +1120,8 @@ class TerminalTelegramTUI:
                     self.current_dialog = dialog
                     break
             self._apply_read_receipts(self.current_dialog.id)
+            self.other_chat_new_counts.pop(self.current_dialog.id, None)
+            self.other_chat_names.pop(self.current_dialog.id, None)
 
         self.last_dialog_refresh = time.monotonic()
         self.dialog_refresh_requested = False
@@ -1145,6 +1212,8 @@ class TerminalTelegramTUI:
             self.history_task.cancel()
             self.history_task = None
         self.current_dialog = dialog
+        self.other_chat_new_counts.pop(dialog.id, None)
+        self.other_chat_names.pop(dialog.id, None)
         self.mode = "chat"
         self.input_buffer = self.draft_by_chat.get(dialog.id, "")
         self.editing_msg_id = None
@@ -1324,24 +1393,45 @@ class TerminalTelegramTUI:
                 f"{self.current_dialog.name} ({self.current_dialog.id}) | Enter: send | Ctrl+N: newline | Esc: dialogs"
             )
         else:
+            chat_id = event.chat_id if isinstance(event.chat_id, int) else None
+            if chat_id is not None:
+                self.other_chat_new_counts[chat_id] = (
+                    self.other_chat_new_counts.get(chat_id, 0) + 1
+                )
+                if chat_id not in self.other_chat_names:
+                    dialog_name = None
+                    for dialog in self.dialogs:
+                        if dialog.id == chat_id:
+                            dialog_name = dialog.name
+                            break
+                    if dialog_name is None:
+                        try:
+                            dialog_name = entity_label(
+                                await event.get_chat(),
+                                fallback=f"id:{chat_id}",
+                            )
+                        except Exception:
+                            dialog_name = f"id:{chat_id}"
+                    self.other_chat_names[chat_id] = dialog_name.replace("\n", " ")
+            self.needs_redraw = True
             self._set_status("New incoming message. Press r to refresh dialogs now.")
 
     async def handle_dialog_key(self, key: Any) -> None:
-        if key in ("j", "J") or key == curses.KEY_DOWN:
+        if key == curses.KEY_DOWN:
             if self.selected_idx < len(self.dialogs) - 1:
                 self.selected_idx += 1
                 self._ensure_dialog_visible()
                 self.needs_redraw = True
             return
 
-        if key in ("k", "K") or key == curses.KEY_UP:
+        if key == curses.KEY_UP:
             if self.selected_idx > 0:
                 self.selected_idx -= 1
                 self._ensure_dialog_visible()
                 self.needs_redraw = True
             return
 
-        if key in ("\n", "\r", "o", "O") or key == curses.KEY_ENTER:
+        if key in ("\n", "\r") or key == curses.KEY_ENTER:
             self._request_open_selected()
             return
 
@@ -1380,7 +1470,7 @@ class TerminalTelegramTUI:
             self.input_buffer = ""
             self.editing_msg_id = None
             self.delete_confirm_msg_id = None
-            self._set_status("Dialog list | j/k move | Enter/o open | Esc quit")
+            self._set_status("Dialog list | Up/Down move | Enter open | Esc quit")
             return
 
         if key == curses.KEY_UP:
@@ -1589,8 +1679,8 @@ class TerminalTelegramTUI:
         height, width = self.stdscr.getmaxyx()
         self._write(
             0,
-            0,
-            "Dialogs | j/k or Up/Down: move | Enter/o: open | r: refresh | Esc: quit",
+            1,
+            "Dialogs | Up/Down: move | Enter: open | r: refresh | Esc: quit",
             curses.A_BOLD,
         )
         self._write(1, 0, "─" * max(0, width - 1), curses.A_DIM)
@@ -1625,10 +1715,10 @@ class TerminalTelegramTUI:
                 badge_pad = " " * max(0, badge_col_width - display_width(badge))
                 is_selected = idx == self.selected_idx
 
-                name_prefix = f"{'>' if is_selected else ' '} {badge}{badge_pad}"
-                name_line = f"{name_prefix}{name}"
+                badge_text = f"{badge}{badge_pad}"
+                badge_width = display_width(badge_text)
 
-                msg_prefix = f"  {' ' * badge_col_width}"
+                msg_prefix = f"{' ' * badge_col_width}"
                 preview_width = max(0, width - display_width(msg_prefix) - 1)
                 preview = self._dialog_preview(dialog, preview_width)
                 msg_line = f"{msg_prefix}{preview}" if preview else msg_prefix
@@ -1643,7 +1733,15 @@ class TerminalTelegramTUI:
                     if y + 1 < height:
                         self._write(y + 1, 0, row_fill, curses.A_REVERSE)
 
-                self._write(y, 0, name_line, name_attr)
+                badge_attr = name_attr
+                if unread > 0:
+                    if self._is_dialog_muted(dialog):
+                        badge_attr = self.badge_muted_attr
+                    else:
+                        badge_attr = self.badge_unread_attr
+
+                self._write(y, 0, badge_text, badge_attr)
+                self._write(y, badge_width, name, name_attr)
                 if y + 1 < height:
                     self._write(y + 1, 0, msg_line, msg_attr)
                 if y + 2 < height:
@@ -1815,10 +1913,13 @@ class TerminalTelegramTUI:
 
         chat_name = str(self.current_dialog.name).replace("\n", " ").strip()
         title = f"{chat_name} | {self.peer_status_text}"
-        title = clip_to_width(title, max(1, width - 1))
+        other_alert = self._other_chat_alert_text()
+        if other_alert:
+            title = f"{title} | {other_alert}"
+        title = clip_to_width(title, max(1, width - 2))
         top_fill = " " * max(0, width - 1)
         self._write(0, 0, top_fill, self.info_bar_attr)
-        self._write(0, 0, title, self.info_bar_attr | curses.A_BOLD)
+        self._write(0, 1, title, self.info_bar_attr | curses.A_BOLD)
 
         body_top = 1
         row_cursor = max(body_top, height - 1)
@@ -1887,8 +1988,8 @@ class TerminalTelegramTUI:
             self._write(info_bar_row, 0, guide_fill, guide_attr)
             self._write(
                 info_bar_row,
-                0,
-                clip_to_width(guide, max(1, width - 1)),
+                1,
+                clip_to_width(guide, max(1, width - 2)),
                 guide_attr | curses.A_BOLD,
             )
 
@@ -1925,7 +2026,7 @@ class TerminalTelegramTUI:
 
     async def run(self) -> None:
         await self.refresh_dialogs()
-        self._set_status("Dialog list loaded. j/k move, Enter/o open, Esc quit")
+        self._set_status("Dialog list loaded. Up/Down move, Enter open, Esc quit")
         self.draw()
 
         while self.running:
