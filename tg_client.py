@@ -1675,6 +1675,21 @@ class TerminalTelegramTUI:
             return left + (bar * fill) + label + right
         return left + label + (bar * fill) + right
 
+    def _date_divider_line(self, width: int, label: str) -> str:
+        if width <= 0:
+            return ""
+
+        center = f" {label} "
+        center = clip_to_width(center, max(1, width))
+        used = display_width(center)
+        if used >= width:
+            return center
+
+        remain = width - used
+        left = remain // 2
+        right = remain - left
+        return ("─" * left) + center + ("─" * right)
+
     def draw_dialogs(self) -> None:
         height, width = self.stdscr.getmaxyx()
         self._write(
@@ -1755,8 +1770,23 @@ class TerminalTelegramTUI:
 
         rendered: list[tuple[str, bool, bool, int | None]] = []
         inner_max = max(1, width - 4)
+        prev_day: Any | None = None
         for idx, entry in enumerate(self.chat_entries):
-            if idx > 0:
+            day = entry.when.date()
+            if prev_day != day:
+                if rendered:
+                    rendered.append(("", False, False, None))
+                rendered.append(
+                    (
+                        self._date_divider_line(width, day.strftime("%Y-%m-%d")),
+                        False,
+                        False,
+                        None,
+                    )
+                )
+                rendered.append(("", False, False, None))
+                prev_day = day
+            elif idx > 0:
                 rendered.append(("", False, False, None))
 
             stamp = entry.when.strftime("%H:%M")
