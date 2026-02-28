@@ -1,8 +1,11 @@
+import asyncio
+import contextlib
 import unittest
 import curses
+from datetime import datetime
 from types import SimpleNamespace
 
-from tg_client import TerminalTelegramTUI
+from tg_client import ChatEntry, TerminalTelegramTUI
 
 
 class DummyStdScr:
@@ -156,6 +159,141 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_chat_key(curses.KEY_BACKSPACE)
         self.assertEqual(app.input_buffer, "acd")
         self.assertEqual(app.input_cursor, 1)
+
+    async def test_file_command_dispatches_send_file_action(self) -> None:
+        app = make_app()
+        app.input_buffer = '/file "/tmp/a b.txt" hello world'
+        app.input_cursor = len(app.input_buffer)
+        app.editing_msg_id = 12
+        app.delete_confirm_msg_id = None
+        captured: dict[str, object] = {}
+
+        def fake_send_file(path: str, caption: str = ""):
+            captured["path"] = path
+            captured["caption"] = caption
+
+            async def _done():
+                return None
+
+            return _done()
+
+        def fake_request(coro, *, error_prefix: str):
+            captured["error_prefix"] = error_prefix
+            coro.close()
+
+        app.send_file_message = fake_send_file  # type: ignore[assignment]
+        app._request_message_action = fake_request  # type: ignore[assignment]
+
+        await app.handle_chat_key("\n")
+        self.assertEqual(captured.get("path"), "/tmp/a b.txt")
+        self.assertEqual(captured.get("caption"), "hello world")
+        self.assertEqual(captured.get("error_prefix"), "File send failed")
+        self.assertEqual(app.input_buffer, "")
+        self.assertIsNone(app.editing_msg_id)
+        self.assertIsNone(app.delete_confirm_msg_id)
+
+    async def test_ctrl_w_saves_selected_media_message(self) -> None:
+        app = make_app()
+        app.chat_entries = [
+            ChatEntry(
+                sender="me",
+                text="<file>",
+                when=datetime.now(),
+                is_me=True,
+                msg_id=88,
+                has_media=True,
+                is_media=True,
+            ),
+        ]
+        app.editing_msg_id = 88
+        captured: dict[str, object] = {}
+
+        def fake_save_media(msg_id: int, output_path: str | None = None):
+            captured["msg_id"] = msg_id
+            captured["output_path"] = output_path
+
+            async def _done():
+                return None
+
+            return _done()
+
+        def fake_request(coro, *, error_prefix: str):
+            captured["error_prefix"] = error_prefix
+            coro.close()
+
+        app.save_message_media = fake_save_media  # type: ignore[assignment]
+        app._request_message_action = fake_request  # type: ignore[assignment]
+
+        await app.handle_chat_key("")  # Ctrl+W
+        self.assertEqual(captured.get("msg_id"), 88)
+        self.assertIsNone(captured.get("output_path"))
+        self.assertEqual(captured.get("error_prefix"), "Media save failed")
+
+    async def test_ctrl_e_selects_outgoing_media_message_too(self) -> None:
+        app = make_app()
+        app.chat_entries = [
+            ChatEntry(
+                sender="me",
+                text="<file: sample.bin | 10KB>",
+                when=datetime.now(),
+                is_me=True,
+                msg_id=77,
+                is_media=True,
+                has_media=True,
+            ),
+        ]
+
+        await app.handle_chat_key("\x05")  # Ctrl+E
+        self.assertEqual(app.editing_msg_id, 77)
+
+    async def test_send_current_message_treats_not_modified_as_success(self) -> None:
+        app = make_app()
+        app.current_dialog = SimpleNamespace(id=100, name="test", entity=object())
+        app.chat_entries = [
+            ChatEntry(
+                sender="me",
+                text="same",
+                when=datetime.now(),
+                is_me=True,
+                msg_id=5,
+            ),
+        ]
+        app.editing_msg_id = 5
+        app.input_buffer = "same"
+        app.input_cursor = len(app.input_buffer)
+        app.draft_by_chat[100] = "draft"
+
+        class MessageNotModifiedError(Exception):
+            pass
+
+        class DummyClient:
+            async def edit_message(self, entity, msg_id, text):
+                raise MessageNotModifiedError(
+                    "Content of the message was not modified"
+                )
+
+        app.client = DummyClient()  # type: ignore[assignment]
+
+        await app.send_current_message()
+
+        self.assertIsNone(app.editing_msg_id)
+        self.assertEqual(app.input_buffer, "draft")
+        self.assertEqual(app.input_cursor, len("draft"))
+        self.assertEqual(app.status, "Message edited")
+
+    async def test_request_message_action_closes_coro_when_busy(self) -> None:
+        app = make_app()
+        app.message_action_task = asyncio.create_task(asyncio.sleep(1))
+
+        async def dummy_action():
+            await asyncio.sleep(0)
+
+        coro = dummy_action()
+        app._request_message_action(coro, error_prefix="x")
+        self.assertIsNone(coro.cr_frame)
+        app.message_action_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await app.message_action_task
 
 
 class DialogKeyBindingsTests(unittest.IsolatedAsyncioTestCase):

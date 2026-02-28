@@ -18,6 +18,7 @@ import json
 import locale
 import logging
 import os
+import shlex
 import sys
 import time
 import unicodedata
@@ -114,6 +115,7 @@ class AppConfig:
     key_edit_newer: str = "ctrl+r"
     key_cancel_edit: str = "ctrl+g"
     key_delete_selected: str = "ctrl+d"
+    key_save_selected: str = "ctrl+w"
     log_file: str = "logs/ttg.log"
     log_level: str = "INFO"
 
@@ -183,6 +185,8 @@ def load_app_config(path: Path | None = None) -> AppConfig:
         config.key_cancel_edit = keys["cancel_edit"]
     if isinstance(keys.get("delete_selected"), str):
         config.key_delete_selected = keys["delete_selected"]
+    if isinstance(keys.get("save_selected"), str):
+        config.key_save_selected = keys["save_selected"]
 
     if isinstance(logging_cfg.get("file"), str) and logging_cfg.get("file").strip():
         config.log_file = logging_cfg.get("file").strip()
@@ -347,6 +351,8 @@ class ChatEntry:
     is_me: bool = False
     msg_id: int | None = None
     read: bool = False
+    is_media: bool = False
+    has_media: bool = False
 
 
 class TerminalTelegramTUI:
@@ -381,6 +387,7 @@ class TerminalTelegramTUI:
         self.input_cursor = 0
 
         self.status = "Connecting..."
+        self.status_updated_at = time.monotonic()
         self.needs_redraw = True
 
         self.dialog_refresh_requested = False
@@ -441,6 +448,10 @@ class TerminalTelegramTUI:
             self.config.key_delete_selected,
             control_char("d"),
         )
+        self.key_save_selected = parse_key_binding(
+            self.config.key_save_selected,
+            control_char("w"),
+        )
 
         self._init_colors()
 
@@ -476,6 +487,7 @@ class TerminalTelegramTUI:
 
     def _set_status(self, value: str) -> None:
         self.status = value.replace("\n", " ").strip()
+        self.status_updated_at = time.monotonic()
         self.needs_redraw = True
 
     def _start_task(
@@ -532,6 +544,12 @@ class TerminalTelegramTUI:
 
     def _request_message_action(self, coro: Any, *, error_prefix: str) -> None:
         if self.message_action_task is not None and not self.message_action_task.done():
+            close = getattr(coro, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
             self._set_status("Previous message action still in progress...")
             return
 
@@ -712,8 +730,6 @@ class TerminalTelegramTUI:
         for entry in reversed(self.chat_entries):
             if not entry.is_me or entry.msg_id is None:
                 continue
-            if entry.text == "<media>":
-                continue
             entries.append(entry)
         return entries
 
@@ -724,7 +740,7 @@ class TerminalTelegramTUI:
 
         editable_entries = self._editable_outgoing_entries()
         if not editable_entries:
-            self._set_status("No editable sent message found.")
+            self._set_status("No sent message found.")
             return
 
         if self.editing_msg_id is None:
@@ -745,9 +761,7 @@ class TerminalTelegramTUI:
                         self._set_input_buffer(current.text)
                         self.chat_scroll_offset = 0
                         self.needs_redraw = True
-                        self._set_status(
-                            f"Already at oldest editable message #{current.msg_id}"
-                        )
+                        self._set_status("Already at oldest selectable message")
                         return
                     target_idx = current_idx + 1
                 else:
@@ -756,9 +770,7 @@ class TerminalTelegramTUI:
                         self._set_input_buffer(current.text)
                         self.chat_scroll_offset = 0
                         self.needs_redraw = True
-                        self._set_status(
-                            f"Already at newest editable message #{current.msg_id}"
-                        )
+                        self._set_status("Already at newest selectable message")
                         return
                     target_idx = current_idx - 1
 
@@ -768,7 +780,32 @@ class TerminalTelegramTUI:
         self._set_input_buffer(target.text)
         self._ensure_selected_message_visible()
         self.needs_redraw = True
-        self._set_status(f"Editing message #{target.msg_id}")
+        if target.is_media:
+            self._set_status("Selected media (Ctrl+W save | Ctrl+D delete)")
+        else:
+            self._set_status("Editing selected message")
+
+    def _request_save_current_editing(self) -> None:
+        if self.current_dialog is None:
+            self._set_status("No active dialog.")
+            return
+
+        if self.editing_msg_id is None:
+            self._set_status("Select a message first (Ctrl+E/Ctrl+R).")
+            return
+
+        entry = self._entry_by_id(self.editing_msg_id)
+        if entry is None:
+            self._set_status("Selected message is unavailable.")
+            return
+        if not entry.has_media:
+            self._set_status("Selected message has no media.")
+            return
+
+        self._request_message_action(
+            self.save_message_media(self.editing_msg_id, None),
+            error_prefix="Media save failed",
+        )
 
     def _cancel_edit_mode(self, *, clear_input: bool = False) -> None:
         if self.editing_msg_id is None:
@@ -959,7 +996,7 @@ class TerminalTelegramTUI:
 
         self.delete_confirm_msg_id = self.editing_msg_id
         self.needs_redraw = True
-        self._set_status(f"Confirm delete #{self.editing_msg_id} (Enter/Y or Esc/N)")
+        self._set_status("Confirm delete selected message (Enter/Y or Esc/N)")
 
     def _confirm_delete_current_editing(self) -> None:
         target_id = self.delete_confirm_msg_id
@@ -1142,6 +1179,59 @@ class TerminalTelegramTUI:
         if not quiet:
             self._set_status(f"Loaded {len(self.dialogs)} dialogs")
 
+    @staticmethod
+    def _format_size(num_bytes: int | None) -> str:
+        if not isinstance(num_bytes, int) or num_bytes < 0:
+            return ""
+        units = ["B", "KB", "MB", "GB", "TB"]
+        size = float(num_bytes)
+        for unit in units:
+            if size < 1024 or unit == units[-1]:
+                if unit == "B":
+                    return f"{int(size)}{unit}"
+                return f"{size:.1f}{unit}"
+            size /= 1024
+        return ""
+
+    def _media_placeholder(self, msg: Message) -> str:
+        file_obj = getattr(msg, "file", None)
+        file_name = (getattr(file_obj, "name", None) or "").strip()
+        size_text = self._format_size(getattr(file_obj, "size", None))
+
+        if getattr(msg, "photo", None) is not None:
+            kind = "photo"
+        elif getattr(msg, "video", None) is not None:
+            kind = "video"
+        elif getattr(msg, "voice", None) is not None:
+            kind = "voice"
+        elif getattr(msg, "audio", None) is not None:
+            kind = "audio"
+        elif getattr(msg, "sticker", None) is not None:
+            kind = "sticker"
+        elif getattr(msg, "gif", None) is not None:
+            kind = "gif"
+        elif getattr(msg, "document", None) is not None:
+            kind = "file"
+        else:
+            kind = "media"
+
+        details: list[str] = []
+        if file_name:
+            details.append(file_name)
+        if size_text:
+            details.append(size_text)
+        if details:
+            return f"<{kind}: {' | '.join(details)}>"
+        return f"<{kind}>"
+
+    def _message_text_and_media_flag(self, msg: Message) -> tuple[str, bool]:
+        text = getattr(msg, "message", None)
+        if isinstance(text, str) and text != "":
+            return text, False
+        if getattr(msg, "media", None) is not None:
+            return self._media_placeholder(msg), True
+        return message_text(text), False
+
     def _entry_from_message(self, msg: Message, chat_id: int | None = None) -> ChatEntry:
         msg_id = msg.id if isinstance(msg.id, int) else None
         is_me = bool(msg.out)
@@ -1159,13 +1249,17 @@ class TerminalTelegramTUI:
                 resolved_chat_id = self.current_dialog.id
             read_max = self.read_outbox_max_by_chat.get(resolved_chat_id or 0, 0)
             read = msg_id <= read_max
+        text, is_media = self._message_text_and_media_flag(msg)
+        has_media = getattr(msg, "media", None) is not None
         return ChatEntry(
             sender=sender,
-            text=message_text(msg.message),
+            text=text,
             when=safe_local_time(msg.date),
             is_me=is_me,
             msg_id=msg_id,
             read=read,
+            is_media=is_media,
+            has_media=has_media,
         )
 
     async def load_older_history(
@@ -1279,23 +1373,39 @@ class TerminalTelegramTUI:
 
         dialog = self.current_dialog
         edit_msg_id = self.editing_msg_id
+        if edit_msg_id is not None:
+            selected = self._entry_by_id(edit_msg_id)
+            if selected is not None and selected.is_media:
+                self._set_status(
+                    "Selected media cannot be edited. Use Ctrl+W to save or Ctrl+D to delete"
+                )
+                return
+
         self._set_input_buffer("")
         text = raw_text
         if edit_msg_id is not None:
-            self._set_status(f"Editing #{edit_msg_id}...")
+            self._set_status("Editing selected message...")
+            edited: Any | None = None
             try:
                 edited = await self.client.edit_message(dialog.entity, edit_msg_id, text)
             except Exception as exc:  # pragma: no cover
-                self.logger.warning(
-                    "Edit failed chat=%s msg=%s: %s",
-                    dialog.id,
-                    edit_msg_id,
-                    exc,
-                )
-                self.input_buffer = raw_text
-                self.input_cursor = min(raw_cursor, len(raw_text))
-                self._set_status(f"Edit failed: {exc}")
-                return
+                if self._is_message_not_modified_error(exc):
+                    self.logger.info(
+                        "Edit skipped (not modified) chat=%s msg=%s",
+                        dialog.id,
+                        edit_msg_id,
+                    )
+                else:
+                    self.logger.warning(
+                        "Edit failed chat=%s msg=%s: %s",
+                        dialog.id,
+                        edit_msg_id,
+                        exc,
+                    )
+                    self.input_buffer = raw_text
+                    self.input_cursor = min(raw_cursor, len(raw_text))
+                    self._set_status(f"Edit failed: {exc}")
+                    return
 
             if self.current_dialog is None or self.current_dialog.id != dialog.id:
                 return
@@ -1303,14 +1413,15 @@ class TerminalTelegramTUI:
             self.editing_msg_id = None
             self._set_input_buffer(self.draft_by_chat.get(dialog.id, ""))
             replaced = False
-            for entry in self.chat_entries:
-                if entry.msg_id != edit_msg_id:
-                    continue
-                entry.text = message_text(getattr(edited, "message", text))
-                entry.when = safe_local_time(getattr(edited, "date", entry.when))
-                replaced = True
-                break
-            if not replaced:
+            if edited is not None:
+                for entry in self.chat_entries:
+                    if entry.msg_id != edit_msg_id:
+                        continue
+                    entry.text = message_text(getattr(edited, "message", text))
+                    entry.when = safe_local_time(getattr(edited, "date", entry.when))
+                    replaced = True
+                    break
+            if edited is not None and not replaced:
                 self.chat_entries.append(
                     self._entry_from_message(edited, chat_id=dialog.id)
                 )
@@ -1318,7 +1429,7 @@ class TerminalTelegramTUI:
             self._rebuild_search_matches(preserve_focus=True)
             self.chat_scroll_offset = 0
             self.dialog_refresh_requested = True
-            self._set_status(f"Edited #{edit_msg_id}")
+            self._set_status("Message edited")
             return
 
         self._sync_current_draft()
@@ -1345,6 +1456,105 @@ class TerminalTelegramTUI:
         self.dialog_refresh_requested = True
         self._set_status("Sent")
 
+    def _is_message_not_modified_error(self, exc: Exception) -> bool:
+        if exc.__class__.__name__ == "MessageNotModifiedError":
+            return True
+        return "not modified" in str(exc).lower()
+
+    async def send_file_message(self, file_path: str, caption: str = "") -> None:
+        if self.current_dialog is None:
+            self._set_status("No active dialog.")
+            return
+
+        path = Path(file_path).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        if not path.exists() or not path.is_file():
+            self._set_status(f"File not found: {path}")
+            return
+
+        dialog = self.current_dialog
+        self._set_status(f"Uploading {path.name} ...")
+        try:
+            sent = await self.client.send_file(
+                dialog.entity,
+                str(path),
+                caption=caption.strip() or None,
+            )
+        except Exception as exc:  # pragma: no cover
+            self.logger.warning("File send failed chat=%s path=%s: %s", dialog.id, path, exc)
+            self._set_status(f"File send failed: {exc}")
+            return
+
+        if self.current_dialog is None or self.current_dialog.id != dialog.id:
+            return
+
+        sent_msg = sent[-1] if isinstance(sent, list) else sent
+        if isinstance(sent_msg, Message):
+            self.chat_entries.append(self._entry_from_message(sent_msg, chat_id=dialog.id))
+            self._rebuild_search_matches(preserve_focus=True)
+            self.chat_scroll_offset = 0
+        self.dialog_refresh_requested = True
+        self._set_status(f"Sent file: {path.name}")
+
+    async def save_message_media(self, msg_id: int, output_path: str | None = None) -> None:
+        if self.current_dialog is None:
+            self._set_status("No active dialog.")
+            return
+
+        dialog = self.current_dialog
+        try:
+            fetched = await self.client.get_messages(dialog.entity, ids=msg_id)
+        except Exception as exc:  # pragma: no cover
+            self.logger.warning("Fetch failed chat=%s msg=%s: %s", dialog.id, msg_id, exc)
+            self._set_status(f"Load message failed: {exc}")
+            return
+
+        msg: Message | None
+        if isinstance(fetched, list):
+            msg = fetched[0] if fetched else None
+        else:
+            msg = fetched
+        if msg is None:
+            self._set_status("Selected message not found")
+            return
+        if getattr(msg, "media", None) is None:
+            self._set_status("Selected message has no media")
+            return
+
+        target: Path
+        if output_path and output_path.strip():
+            raw = output_path.strip()
+            target = Path(raw).expanduser()
+            if raw.endswith("/") or raw.endswith("\\") or (
+                target.exists() and target.is_dir()
+            ):
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            target = Path("downloads")
+            target.mkdir(parents=True, exist_ok=True)
+
+        self._set_status("Downloading selected media...")
+        try:
+            saved_path = await self.client.download_media(msg, file=str(target))
+        except Exception as exc:  # pragma: no cover
+            self.logger.warning(
+                "Media save failed chat=%s msg=%s target=%s: %s",
+                dialog.id,
+                msg_id,
+                target,
+                exc,
+            )
+            self._set_status(f"Media save failed: {exc}")
+            return
+
+        if not saved_path:
+            self._set_status("Media save failed: no output path returned")
+            return
+        self._set_status(f"Saved media: {saved_path}")
+
     async def delete_outgoing_message(self, target_id: int) -> None:
         if self.current_dialog is None:
             self._set_status("No active dialog.")
@@ -1356,7 +1566,7 @@ class TerminalTelegramTUI:
             return
 
         dialog = self.current_dialog
-        self._set_status(f"Deleting #{target_id}...")
+        self._set_status("Deleting selected message...")
         try:
             await self.client.delete_messages(dialog.entity, [target_id], revoke=True)
         except Exception as exc:  # pragma: no cover
@@ -1381,7 +1591,7 @@ class TerminalTelegramTUI:
         self._rebuild_search_matches(preserve_focus=True)
         self.chat_scroll_offset = 0
         self.dialog_refresh_requested = True
-        self._set_status(f"Deleted #{target_id}")
+        self._set_status("Message deleted")
 
     async def on_new_message(self, event: events.NewMessage.Event) -> None:
         self.dialog_refresh_requested = True
@@ -1390,20 +1600,13 @@ class TerminalTelegramTUI:
             and self.current_dialog is not None
             and event.chat_id == self.current_dialog.id
         ):
-            sender = entity_label(
-                await event.get_sender(),
-                fallback=f"id:{event.sender_id}" if event.sender_id is not None else "unknown",
-            )
-            self.chat_entries.append(
-                ChatEntry(
-                    sender=sender,
-                    text=message_text(event.raw_text),
-                    when=safe_local_time(event.date),
-                    is_me=False,
-                    msg_id=event.id if isinstance(event.id, int) else None,
-                    read=False,
+            entry = self._entry_from_message(event.message, chat_id=self.current_dialog.id)
+            if not entry.is_me:
+                entry.sender = entity_label(
+                    await event.get_sender(),
+                    fallback=entry.sender,
                 )
-            )
+            self.chat_entries.append(entry)
             self._rebuild_search_matches(preserve_focus=True)
             self._schedule_ack_read(self.current_dialog, max_id=event.id)
             self._set_status(
@@ -1591,6 +1794,10 @@ class TerminalTelegramTUI:
             self._request_delete_current_editing()
             return
 
+        if key == self.key_save_selected:
+            self._request_save_current_editing()
+            return
+
         if key in ("\r", "\n", 13, 10) or key == curses.KEY_ENTER:
             if self.chat_scroll_offset > 0:
                 self.chat_scroll_offset = 0
@@ -1621,6 +1828,30 @@ class TerminalTelegramTUI:
                 self._clear_search_state()
                 self.needs_redraw = True
                 self._set_status("Search cleared")
+                return
+            if cmd == "/file":
+                self._set_status("Usage: /file <path> [caption]")
+                return
+            if cmd.startswith("/file "):
+                try:
+                    parts = shlex.split(cmd)
+                except ValueError as exc:
+                    self._set_status(f"Invalid /file command: {exc}")
+                    return
+                if len(parts) < 2:
+                    self._set_status("Usage: /file <path> [caption]")
+                    return
+                file_path = parts[1]
+                caption = " ".join(parts[2:]) if len(parts) > 2 else ""
+                self._set_input_buffer("")
+                self._sync_current_draft()
+                if self.editing_msg_id is not None:
+                    self.editing_msg_id = None
+                    self.delete_confirm_msg_id = None
+                self._request_message_action(
+                    self.send_file_message(file_path, caption),
+                    error_prefix="File send failed",
+                )
                 return
 
             if cmd in (
@@ -2065,10 +2296,11 @@ class TerminalTelegramTUI:
                 input_rows.insert(0, row_cursor)
                 row_cursor -= 1
 
-        info_bar_row: int | None = None
-        if row_cursor >= body_top:
-            info_bar_row = row_cursor
-            row_cursor -= 1
+        info_rows: list[int] = []
+        for _ in range(2):
+            if row_cursor >= body_top:
+                info_rows.insert(0, row_cursor)
+                row_cursor -= 1
 
         body_height = max(1, row_cursor - body_top + 1)
 
@@ -2089,18 +2321,18 @@ class TerminalTelegramTUI:
                 x = max(0, content_width - display_width(line))
             self._write(body_top + idx, x, line, attr)
 
-        if info_bar_row is not None:
+        if info_rows:
             if self.editing_msg_id is not None:
                 guide = (
-                    f"EDIT #{self.editing_msg_id} | Enter: save | "
-                    "Ctrl+E: older | Ctrl+R: newer | Ctrl+G: cancel | Ctrl+D: delete selected"
+                    "EDIT | Enter: save | "
+                    "^E: older | ^R: newer | ^G: cancel | ^W: save media | ^D: delete"
                 )
             elif self.search_query:
                 if self.search_match_msg_ids:
                     guide = (
                         f"SEARCH '{self.search_query}' "
                         f"{self.search_match_idx + 1}/{len(self.search_match_msg_ids)} | "
-                        "Ctrl+N: next | Ctrl+P: prev | Esc: clear"
+                        "^N: next | ^P: prev | Esc: clear"
                     )
                 else:
                     guide = (
@@ -2111,22 +2343,59 @@ class TerminalTelegramTUI:
                 if self.chat_scroll_offset > 0:
                     guide = (
                         "Enter: bottom | "
-                        "Ctrl+E: Select Message | /s <query>"
+                        "^E: Select Message | /s <query>"
                     )
                 else:
                     guide = (
-                        "Ctrl+N: newline | "
-                        "Ctrl+E: Select Message | /s <query>"
+                        "^N: newline | "
+                        "^E: Select Message | /s <query>"
                     )
+
+            status_text = self.status.strip()
+            status_fresh = (time.monotonic() - self.status_updated_at) <= 8.0
+            if status_text and status_fresh:
+                status_line = status_text
+            elif self.search_query:
+                if self.search_match_msg_ids:
+                    status_line = (
+                        f"Search '{self.search_query}' "
+                        f"{self.search_match_idx + 1}/{len(self.search_match_msg_ids)}"
+                    )
+                else:
+                    status_line = f"Search '{self.search_query}' 0/0"
+            elif self.editing_msg_id is not None:
+                status_line = "Selected message mode"
+            elif self.chat_scroll_offset > 0:
+                status_line = "History view"
+            else:
+                status_line = "Input mode"
+
             guide_attr = curses.A_REVERSE
             guide_fill = " " * max(0, width - 1)
-            self._write(info_bar_row, 0, guide_fill, guide_attr)
-            self._write(
-                info_bar_row,
-                1,
-                clip_to_width(guide, max(1, width - 2)),
-                guide_attr | curses.A_BOLD,
-            )
+            for row in info_rows:
+                self._write(row, 0, guide_fill, guide_attr)
+
+            if len(info_rows) == 1:
+                compact = f"{status_line} | {guide}" if status_line else guide
+                self._write(
+                    info_rows[0],
+                    1,
+                    clip_to_width(compact, max(1, width - 2)),
+                    guide_attr | curses.A_BOLD,
+                )
+            else:
+                self._write(
+                    info_rows[0],
+                    1,
+                    clip_to_width(status_line, max(1, width - 2)),
+                    guide_attr,
+                )
+                self._write(
+                    info_rows[1],
+                    1,
+                    clip_to_width(guide, max(1, width - 2)),
+                    guide_attr | curses.A_BOLD,
+                )
 
         render_rows = max(1, len(input_rows))
         rendered_input, cursor_row, cursor_x = self._render_input_lines(
