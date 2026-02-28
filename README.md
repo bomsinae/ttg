@@ -75,11 +75,13 @@ Session is saved as `<TG_SESSION_NAME>.session`.
 - Reaching the top and continuing Up loads older history automatically
 - `Enter`: if scrolled up, jump to bottom first; otherwise send message
 - `Ctrl+N`: insert newline
-- `Ctrl+E`: select latest sent message for edit; press again for older messages
-- `Ctrl+R`: move selection toward newer sent messages
-- `Ctrl+D`: delete currently selected sent message (with confirm dialog)
+- `Ctrl+E`: select latest message; press again for older messages
+- `Ctrl+R`: move selection toward newer messages
+- `Ctrl+W`: save media from currently selected message (`Ctrl+E`/`Ctrl+R` selection)
+- `Ctrl+D`: delete currently selected own message (with confirm dialog)
 - `Ctrl+G`: cancel edit mode
 - `/s <query>`: start search and jump to latest match
+- `/file <path> [caption]`: send a local file
 - In search mode: `Ctrl+N` / `Ctrl+P` to move through matches
 - In search mode: first `Esc` clears search, second `Esc` returns to dialogs
 - Outgoing messages show `✓` (sent) / `✓✓` (read by peer, mainly 1:1 chats)
