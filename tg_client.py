@@ -378,6 +378,7 @@ class TerminalTelegramTUI:
         self.chat_entries: list[ChatEntry] = []
         self.chat_scroll_offset = 0
         self.input_buffer = ""
+        self.input_cursor = 0
 
         self.status = "Connecting..."
         self.needs_redraw = True
@@ -741,7 +742,7 @@ class TerminalTelegramTUI:
                 if older:
                     if current_idx + 1 >= len(editable_entries):
                         current = editable_entries[current_idx]
-                        self.input_buffer = current.text
+                        self._set_input_buffer(current.text)
                         self.chat_scroll_offset = 0
                         self.needs_redraw = True
                         self._set_status(
@@ -752,7 +753,7 @@ class TerminalTelegramTUI:
                 else:
                     if current_idx == 0:
                         current = editable_entries[current_idx]
-                        self.input_buffer = current.text
+                        self._set_input_buffer(current.text)
                         self.chat_scroll_offset = 0
                         self.needs_redraw = True
                         self._set_status(
@@ -764,7 +765,7 @@ class TerminalTelegramTUI:
         target = editable_entries[target_idx]
 
         self.editing_msg_id = target.msg_id
-        self.input_buffer = target.text
+        self._set_input_buffer(target.text)
         self._ensure_selected_message_visible()
         self.needs_redraw = True
         self._set_status(f"Editing message #{target.msg_id}")
@@ -776,9 +777,11 @@ class TerminalTelegramTUI:
         self.delete_confirm_msg_id = None
         if clear_input:
             if self.current_dialog is not None:
-                self.input_buffer = self.draft_by_chat.get(self.current_dialog.id, "")
+                self._set_input_buffer(
+                    self.draft_by_chat.get(self.current_dialog.id, "")
+                )
             else:
-                self.input_buffer = ""
+                self._set_input_buffer("")
         self.needs_redraw = True
         self._set_status("Edit mode canceled")
 
@@ -796,6 +799,17 @@ class TerminalTelegramTUI:
             self.draft_by_chat[chat_id] = self.input_buffer
         else:
             self.draft_by_chat.pop(chat_id, None)
+
+    def _set_input_buffer(self, value: str) -> None:
+        self.input_buffer = value
+        self.input_cursor = len(value)
+
+    def _clamp_input_cursor(self) -> None:
+        if self.input_cursor < 0:
+            self.input_cursor = 0
+        max_pos = len(self.input_buffer)
+        if self.input_cursor > max_pos:
+            self.input_cursor = max_pos
 
     def _clear_search_state(self) -> None:
         self.search_query = ""
@@ -1215,7 +1229,7 @@ class TerminalTelegramTUI:
         self.other_chat_new_counts.pop(dialog.id, None)
         self.other_chat_names.pop(dialog.id, None)
         self.mode = "chat"
-        self.input_buffer = self.draft_by_chat.get(dialog.id, "")
+        self._set_input_buffer(self.draft_by_chat.get(dialog.id, ""))
         self.editing_msg_id = None
         self.delete_confirm_msg_id = None
         self._clear_search_state()
@@ -1259,12 +1273,13 @@ class TerminalTelegramTUI:
             return
 
         raw_text = self.input_buffer
+        raw_cursor = self.input_cursor
         if not raw_text.strip():
             return
 
         dialog = self.current_dialog
         edit_msg_id = self.editing_msg_id
-        self.input_buffer = ""
+        self._set_input_buffer("")
         text = raw_text
         if edit_msg_id is not None:
             self._set_status(f"Editing #{edit_msg_id}...")
@@ -1278,6 +1293,7 @@ class TerminalTelegramTUI:
                     exc,
                 )
                 self.input_buffer = raw_text
+                self.input_cursor = min(raw_cursor, len(raw_text))
                 self._set_status(f"Edit failed: {exc}")
                 return
 
@@ -1285,7 +1301,7 @@ class TerminalTelegramTUI:
                 return
 
             self.editing_msg_id = None
-            self.input_buffer = self.draft_by_chat.get(dialog.id, "")
+            self._set_input_buffer(self.draft_by_chat.get(dialog.id, ""))
             replaced = False
             for entry in self.chat_entries:
                 if entry.msg_id != edit_msg_id:
@@ -1314,6 +1330,7 @@ class TerminalTelegramTUI:
             self.draft_by_chat[dialog.id] = raw_text
             if self.current_dialog is not None and self.current_dialog.id == dialog.id:
                 self.input_buffer = raw_text
+                self.input_cursor = min(raw_cursor, len(raw_text))
             self._set_status(f"Send failed: {exc}")
             return
 
@@ -1360,7 +1377,7 @@ class TerminalTelegramTUI:
         ]
         if self.editing_msg_id == target_id:
             self.editing_msg_id = None
-            self.input_buffer = self.draft_by_chat.get(dialog.id, "")
+            self._set_input_buffer(self.draft_by_chat.get(dialog.id, ""))
         self._rebuild_search_matches(preserve_focus=True)
         self.chat_scroll_offset = 0
         self.dialog_refresh_requested = True
@@ -1431,6 +1448,22 @@ class TerminalTelegramTUI:
                 self.needs_redraw = True
             return
 
+        if key == curses.KEY_NPAGE:
+            if self.dialogs:
+                step = max(1, self._dialog_rows())
+                self.selected_idx = min(len(self.dialogs) - 1, self.selected_idx + step)
+                self._ensure_dialog_visible()
+                self.needs_redraw = True
+            return
+
+        if key == curses.KEY_PPAGE:
+            if self.dialogs:
+                step = max(1, self._dialog_rows())
+                self.selected_idx = max(0, self.selected_idx - step)
+                self._ensure_dialog_visible()
+                self.needs_redraw = True
+            return
+
         if key in ("\n", "\r") or key == curses.KEY_ENTER:
             self._request_open_selected()
             return
@@ -1467,10 +1500,10 @@ class TerminalTelegramTUI:
                 self.history_task = None
             self._sync_current_draft()
             self.mode = "dialogs"
-            self.input_buffer = ""
+            self._set_input_buffer("")
             self.editing_msg_id = None
             self.delete_confirm_msg_id = None
-            self._set_status("Dialog list | Up/Down move | Enter open | Esc quit")
+            self._set_status("Dialog list | Up/Down/PgUp/PgDn move | Enter open | Esc quit")
             return
 
         if key == curses.KEY_UP:
@@ -1486,6 +1519,34 @@ class TerminalTelegramTUI:
             self.needs_redraw = True
             return
 
+        if key == curses.KEY_PPAGE:
+            step = max(1, self._chat_body_height() - 1)
+            max_scroll = self._chat_max_scroll()
+            self.chat_scroll_offset = min(max_scroll, self.chat_scroll_offset + step)
+            if self.chat_scroll_offset >= max_scroll:
+                self._request_load_older_history()
+            self.needs_redraw = True
+            return
+
+        if key == curses.KEY_NPAGE:
+            step = max(1, self._chat_body_height() - 1)
+            if self.chat_scroll_offset > 0:
+                self.chat_scroll_offset = max(0, self.chat_scroll_offset - step)
+            self.needs_redraw = True
+            return
+
+        if key == curses.KEY_LEFT:
+            if self.input_cursor > 0:
+                self.input_cursor -= 1
+                self.needs_redraw = True
+            return
+
+        if key == curses.KEY_RIGHT:
+            if self.input_cursor < len(self.input_buffer):
+                self.input_cursor += 1
+                self.needs_redraw = True
+            return
+
         if key == self.key_newline:
             if (
                 self.search_query
@@ -1494,7 +1555,12 @@ class TerminalTelegramTUI:
             ):
                 self._move_search(older=True)
                 return
-            self.input_buffer += "\n"
+            self.input_buffer = (
+                self.input_buffer[: self.input_cursor]
+                + "\n"
+                + self.input_buffer[self.input_cursor :]
+            )
+            self.input_cursor += 1
             self._sync_current_draft()
             self.needs_redraw = True
             self._request_peer_status_refresh(force=False)
@@ -1533,7 +1599,7 @@ class TerminalTelegramTUI:
 
             cmd = self.input_buffer.strip()
             if cmd in ("/s", "/search"):
-                self.input_buffer = ""
+                self._set_input_buffer("")
                 self._sync_current_draft()
                 self._start_search("")
                 return
@@ -1542,7 +1608,7 @@ class TerminalTelegramTUI:
                     query = cmd[len("/s ") :]
                 else:
                     query = cmd[len("/search ") :]
-                self.input_buffer = ""
+                self._set_input_buffer("")
                 self._sync_current_draft()
                 if self.editing_msg_id is not None:
                     self.editing_msg_id = None
@@ -1550,7 +1616,7 @@ class TerminalTelegramTUI:
                 self._start_search(query)
                 return
             if cmd in ("/clearsearch", "/searchclear"):
-                self.input_buffer = ""
+                self._set_input_buffer("")
                 self._sync_current_draft()
                 self._clear_search_state()
                 self.needs_redraw = True
@@ -1563,12 +1629,12 @@ class TerminalTelegramTUI:
                 "/editlast",
                 "/older",
             ):
-                self.input_buffer = ""
+                self._set_input_buffer("")
                 self._sync_current_draft()
                 self._cycle_edit_outgoing(older=True)
                 return
             if cmd in ("/newer",):
-                self.input_buffer = ""
+                self._set_input_buffer("")
                 self._sync_current_draft()
                 self._cycle_edit_outgoing(older=False)
                 return
@@ -1578,13 +1644,13 @@ class TerminalTelegramTUI:
                 "/delete_last",
                 "/deletelast",
             ):
-                self.input_buffer = ""
+                self._set_input_buffer("")
                 self._sync_current_draft()
                 self._request_delete_current_editing()
                 self.needs_redraw = True
                 return
             if cmd in ("/cancel", "/cancel_edit", "/canceledit"):
-                self.input_buffer = ""
+                self._set_input_buffer("")
                 self._sync_current_draft()
                 self._cancel_edit_mode(clear_input=True)
                 return
@@ -1592,14 +1658,28 @@ class TerminalTelegramTUI:
             return
 
         if key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
-            if self.input_buffer:
-                self.input_buffer = self.input_buffer[:-1]
+            if self.input_cursor > 0:
+                self.input_buffer = (
+                    self.input_buffer[: self.input_cursor - 1]
+                    + self.input_buffer[self.input_cursor :]
+                )
+                self.input_cursor -= 1
+                self._sync_current_draft()
+                self.needs_redraw = True
+            return
+
+        if key == curses.KEY_DC:
+            if self.input_cursor < len(self.input_buffer):
+                self.input_buffer = (
+                    self.input_buffer[: self.input_cursor]
+                    + self.input_buffer[self.input_cursor + 1 :]
+                )
                 self._sync_current_draft()
                 self.needs_redraw = True
             return
 
         if key == "\x15":  # Ctrl+U
-            self.input_buffer = ""
+            self._set_input_buffer("")
             self._sync_current_draft()
             self.needs_redraw = True
             return
@@ -1609,7 +1689,12 @@ class TerminalTelegramTUI:
             return
 
         if isinstance(key, str) and key.isprintable():
-            self.input_buffer += key
+            self.input_buffer = (
+                self.input_buffer[: self.input_cursor]
+                + key
+                + self.input_buffer[self.input_cursor :]
+            )
+            self.input_cursor += len(key)
             self._sync_current_draft()
             self.needs_redraw = True
             self._request_peer_status_refresh(force=False)
@@ -1695,7 +1780,7 @@ class TerminalTelegramTUI:
         self._write(
             0,
             1,
-            "Dialogs | Up/Down: move | Enter: open | r: refresh | Esc: quit",
+            "Dialogs | Up/Down/PgUp/PgDn: move | Enter: open | r: refresh | Esc: quit",
             curses.A_BOLD,
         )
         self._write(1, 0, "─" * max(0, width - 1), curses.A_DIM)
@@ -1863,21 +1948,36 @@ class TerminalTelegramTUI:
 
     def _render_input_lines(
         self, width: int, rows: int
-    ) -> tuple[list[tuple[str, str]], int]:
+    ) -> tuple[list[tuple[str, str]], int, int]:
         prompt = "E> " if self.editing_msg_id is not None else "> "
         continuation = "  "
         prompt_w = display_width(prompt)
         usable_w = max(1, width - prompt_w - 1)
 
-        logical_lines = self.input_buffer.split("\n")
-        visual_lines: list[str] = []
-        for logical in logical_lines:
-            visual_lines.extend(wrap_by_width(logical, usable_w))
-        if not visual_lines:
-            visual_lines = [""]
+        def _to_visual_lines(text: str) -> list[str]:
+            chunks: list[str] = []
+            for logical in text.split("\n"):
+                chunks.extend(wrap_by_width(logical, usable_w))
+            if not chunks:
+                chunks = [""]
+            return chunks
 
-        visible = visual_lines[-rows:]
-        top_padding = rows - len(visible)
+        self._clamp_input_cursor()
+        visual_lines = _to_visual_lines(self.input_buffer)
+        cursor_prefix_text = self.input_buffer[: self.input_cursor]
+        cursor_visual_lines = _to_visual_lines(cursor_prefix_text)
+        cursor_line_idx = len(cursor_visual_lines) - 1
+        cursor_col = display_width(cursor_visual_lines[-1])
+
+        total_lines = len(visual_lines)
+        visible_count = min(rows, total_lines)
+        if total_lines <= rows:
+            first_visible_idx = 0
+        else:
+            first_visible_idx = min(cursor_line_idx, total_lines - rows)
+        visible = visual_lines[first_visible_idx : first_visible_idx + visible_count]
+
+        top_padding = rows - visible_count
         rendered: list[tuple[str, str]] = []
         for row_idx in range(rows):
             if row_idx < top_padding:
@@ -1887,9 +1987,14 @@ class TerminalTelegramTUI:
             prefix = prompt if content_idx == 0 else continuation
             rendered.append((prefix, visible[content_idx]))
 
-        cursor_prefix, cursor_line = rendered[-1]
-        cursor_x = min(max(0, width - 2), display_width(cursor_prefix) + display_width(cursor_line))
-        return rendered, cursor_x
+        cursor_row = (cursor_line_idx - first_visible_idx) + top_padding
+        if cursor_row < 0:
+            cursor_row = 0
+        if cursor_row >= rows:
+            cursor_row = rows - 1
+        cursor_prefix = rendered[cursor_row][0]
+        cursor_x = min(max(0, width - 2), display_width(cursor_prefix) + cursor_col)
+        return rendered, cursor_row, cursor_x
 
     def _draw_delete_confirm_modal(self) -> None:
         target_id = self.delete_confirm_msg_id
@@ -2024,14 +2129,17 @@ class TerminalTelegramTUI:
             )
 
         render_rows = max(1, len(input_rows))
-        rendered_input, cursor_x = self._render_input_lines(width, render_rows)
+        rendered_input, cursor_row, cursor_x = self._render_input_lines(
+            width, render_rows
+        )
         if input_rows:
             for idx, row in enumerate(input_rows):
                 prefix, text = rendered_input[idx]
                 self._write(row, 0, prefix + text)
-            cursor_y = input_rows[-1]
+            cursor_y = input_rows[min(max(cursor_row, 0), len(input_rows) - 1)]
         else:
-            prefix, text = rendered_input[-1]
+            row_idx = min(max(cursor_row, 0), len(rendered_input) - 1)
+            prefix, text = rendered_input[row_idx]
             cursor_y = max(body_top, row_cursor)
             self._write(cursor_y, 0, prefix + text)
 
@@ -2056,7 +2164,7 @@ class TerminalTelegramTUI:
 
     async def run(self) -> None:
         await self.refresh_dialogs()
-        self._set_status("Dialog list loaded. Up/Down move, Enter open, Esc quit")
+        self._set_status("Dialog list loaded. Up/Down/PgUp/PgDn move, Enter open, Esc quit")
         self.draw()
 
         while self.running:

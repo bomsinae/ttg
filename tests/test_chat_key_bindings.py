@@ -23,6 +23,17 @@ def make_app() -> TerminalTelegramTUI:
     return app
 
 
+def make_dialog_app(dialog_count: int = 20) -> TerminalTelegramTUI:
+    app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
+    app.mode = "dialogs"
+    app.dialogs = [
+        SimpleNamespace(id=idx, name=f"d{idx}", unread_count=0, message=None)
+        for idx in range(dialog_count)
+    ]
+    app.selected_idx = 0
+    return app
+
+
 class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_esc_clears_search_before_leaving_chat(self) -> None:
         app = make_app()
@@ -63,14 +74,17 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_ctrl_n_inserts_newline_when_search_not_active(self) -> None:
         app = make_app()
         app.input_buffer = "line"
+        app.input_cursor = len(app.input_buffer)
 
         await app.handle_chat_key("\x0e")
         self.assertEqual(app.input_buffer, "line\n")
+        self.assertEqual(app.input_cursor, len("line\n"))
         self.assertEqual(app.draft_by_chat.get(100), "line\n")
 
     async def test_slash_s_command_triggers_search(self) -> None:
         app = make_app()
         app.input_buffer = "/s keyword"
+        app.input_cursor = len(app.input_buffer)
         app.editing_msg_id = 10
         called: list[str] = []
         app._start_search = lambda query: called.append(query)  # type: ignore[assignment]
@@ -102,6 +116,72 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_chat_key(curses.KEY_UP)
         self.assertEqual(app.chat_scroll_offset, 1)
         self.assertEqual(called, [])
+
+    async def test_page_up_scrolls_by_body_height_and_requests_history_at_top(self) -> None:
+        app = make_app()
+        app.chat_scroll_offset = 0
+        app._chat_body_height = lambda: 6  # type: ignore[assignment]
+        app._chat_max_scroll = lambda: 4  # type: ignore[assignment]
+        called: list[bool] = []
+        app._request_load_older_history = lambda: called.append(True)  # type: ignore[assignment]
+
+        await app.handle_chat_key(curses.KEY_PPAGE)
+        self.assertEqual(app.chat_scroll_offset, 4)
+        self.assertEqual(called, [True])
+
+    async def test_page_down_scrolls_toward_bottom_by_body_height(self) -> None:
+        app = make_app()
+        app.chat_scroll_offset = 10
+        app._chat_body_height = lambda: 5  # type: ignore[assignment]
+
+        await app.handle_chat_key(curses.KEY_NPAGE)
+        self.assertEqual(app.chat_scroll_offset, 6)
+
+    async def test_left_right_moves_cursor_and_inserts_in_middle(self) -> None:
+        app = make_app()
+        app.input_buffer = "ab"
+        app.input_cursor = len(app.input_buffer)
+
+        await app.handle_chat_key(curses.KEY_LEFT)
+        await app.handle_chat_key("X")
+
+        self.assertEqual(app.input_buffer, "aXb")
+        self.assertEqual(app.input_cursor, 2)
+
+    async def test_backspace_uses_cursor_position(self) -> None:
+        app = make_app()
+        app.input_buffer = "abcd"
+        app.input_cursor = 2
+
+        await app.handle_chat_key(curses.KEY_BACKSPACE)
+        self.assertEqual(app.input_buffer, "acd")
+        self.assertEqual(app.input_cursor, 1)
+
+
+class DialogKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_page_down_moves_selection_by_dialog_rows(self) -> None:
+        app = make_dialog_app()
+        app._dialog_rows = lambda: 5  # type: ignore[assignment]
+        app.selected_idx = 1
+
+        await app.handle_dialog_key(curses.KEY_NPAGE)
+        self.assertEqual(app.selected_idx, 6)
+
+    async def test_page_up_moves_selection_by_dialog_rows(self) -> None:
+        app = make_dialog_app()
+        app._dialog_rows = lambda: 4  # type: ignore[assignment]
+        app.selected_idx = 7
+
+        await app.handle_dialog_key(curses.KEY_PPAGE)
+        self.assertEqual(app.selected_idx, 3)
+
+    async def test_page_down_clamps_to_last_dialog(self) -> None:
+        app = make_dialog_app(dialog_count=6)
+        app._dialog_rows = lambda: 10  # type: ignore[assignment]
+        app.selected_idx = 2
+
+        await app.handle_dialog_key(curses.KEY_NPAGE)
+        self.assertEqual(app.selected_idx, 5)
 
 
 if __name__ == "__main__":

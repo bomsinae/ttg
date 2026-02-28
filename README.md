@@ -64,11 +64,14 @@ Session is saved as `<TG_SESSION_NAME>.session`.
 
 - App opens in dialog list screen first
 - Up / Down: move selection
+- PageUp / PageDown: move selection by one page in dialog list
 - `Enter`: open selected dialog
 - `Esc`: quit (from dialog list)
 - `r`: refresh dialogs (from dialog list)
 - Chat input area has 2 lines
+- Left / Right: move cursor inside the input box
 - Up / Down: scroll chat history
+- PageUp / PageDown: scroll chat by one page
 - Reaching the top and continuing Up loads older history automatically
 - `Enter`: if scrolled up, jump to bottom first; otherwise send message
 - `Ctrl+N`: insert newline
