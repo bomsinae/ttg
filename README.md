@@ -60,6 +60,22 @@ python3 -m venv .venv
 On first run, Telegram asks for phone/code (and 2FA password if enabled).
 Session is saved as `<TG_SESSION_NAME>.session`.
 
+## 5) Package Install (Optional)
+
+You can install this project as a CLI package:
+
+```bash
+python3 -m pip install .
+ttg
+```
+
+For isolated user install:
+
+```bash
+pipx install .
+ttg
+```
+
 ## Controls (TUI)
 
 - App opens in dialog list screen first
@@ -89,8 +105,10 @@ Session is saved as `<TG_SESSION_NAME>.session`.
 ## Logging
 
 - Default log file: `logs/ttg.log`
-- Log rotation: 1 MB × 3 backups
-- Log level/file path can be changed in `ttg_config.json` under `logging`
+- Log rotation defaults: 1 MB × 3 backups
+- Log text redacts configured secrets and phone-like numbers by default
+- Log level/file path/rotation/redaction can be changed in `ttg_config.json` under `logging`
+- Cleanup command: `ttg --clean-logs` (or `./run.sh --clean-logs`)
 
 ## Tests
 

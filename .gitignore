@@ -4,6 +4,9 @@
 # Python artifacts
 __pycache__/
 *.py[cod]
+build/
+dist/
+*.egg-info/
 
 # Virtual environment
 .venv/

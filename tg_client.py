@@ -12,12 +12,14 @@ Key flow:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import curses
 import json
 import locale
 import logging
 import os
+import re
 import shlex
 import sys
 import time
@@ -102,6 +104,20 @@ def _as_positive_float(value: Any, default: float) -> float:
     return parsed
 
 
+def _as_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
 @dataclass
 class AppConfig:
     auto_refresh_interval_sec: float = 8.0
@@ -118,6 +134,10 @@ class AppConfig:
     key_save_selected: str = "ctrl+w"
     log_file: str = "logs/ttg.log"
     log_level: str = "INFO"
+    log_max_bytes: int = 1_000_000
+    log_backup_count: int = 3
+    log_redact_secrets: bool = True
+    log_redact_phone_numbers: bool = True
 
 
 def load_app_config(path: Path | None = None) -> AppConfig:
@@ -192,8 +212,129 @@ def load_app_config(path: Path | None = None) -> AppConfig:
         config.log_file = logging_cfg.get("file").strip()
     if isinstance(logging_cfg.get("level"), str) and logging_cfg.get("level").strip():
         config.log_level = logging_cfg.get("level").strip().upper()
+    config.log_max_bytes = _as_positive_int(
+        logging_cfg.get("max_bytes", config.log_max_bytes),
+        config.log_max_bytes,
+    )
+    config.log_backup_count = _as_positive_int(
+        logging_cfg.get("backup_count", config.log_backup_count),
+        config.log_backup_count,
+    )
+    config.log_redact_secrets = _as_bool(
+        logging_cfg.get("redact_secrets", config.log_redact_secrets),
+        config.log_redact_secrets,
+    )
+    config.log_redact_phone_numbers = _as_bool(
+        logging_cfg.get("redact_phone_numbers", config.log_redact_phone_numbers),
+        config.log_redact_phone_numbers,
+    )
 
     return config
+
+
+def resolve_log_path(log_file: str) -> Path:
+    log_path = Path(log_file)
+    if not log_path.is_absolute():
+        log_path = Path.cwd() / log_path
+    return log_path
+
+
+def _collect_sensitive_values() -> list[str]:
+    values: list[str] = []
+    for key in ("TG_API_HASH", "TG_API_ID", "TG_SESSION_NAME"):
+        value = os.getenv(key, "").strip()
+        if value:
+            values.append(value)
+    return values
+
+
+_PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d()\-\s]{6,}\d)")
+
+
+def redact_log_text(
+    text: str,
+    *,
+    redact_secrets: bool,
+    redact_phone_numbers: bool,
+    sensitive_values: list[str],
+) -> str:
+    cleaned = text
+    if redact_secrets:
+        for secret in sorted(set(sensitive_values), key=len, reverse=True):
+            if secret:
+                cleaned = cleaned.replace(secret, "[redacted]")
+    if redact_phone_numbers:
+        cleaned = _PHONE_RE.sub("[redacted-phone]", cleaned)
+    return cleaned
+
+
+class RedactingLogFilter(logging.Filter):
+    def __init__(
+        self,
+        *,
+        redact_secrets: bool,
+        redact_phone_numbers: bool,
+        sensitive_values: list[str],
+    ) -> None:
+        super().__init__()
+        self.redact_secrets = redact_secrets
+        self.redact_phone_numbers = redact_phone_numbers
+        self.sensitive_values = sensitive_values
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            rendered = str(record.msg)
+        sanitized = redact_log_text(
+            rendered,
+            redact_secrets=self.redact_secrets,
+            redact_phone_numbers=self.redact_phone_numbers,
+            sensitive_values=self.sensitive_values,
+        )
+        record.msg = sanitized
+        record.args = ()
+        return True
+
+
+def cleanup_log_files(config: AppConfig) -> tuple[list[Path], list[tuple[Path, str]]]:
+    log_path = resolve_log_path(config.log_file)
+    candidates: list[Path] = []
+    if log_path.exists() and log_path.is_file():
+        candidates.append(log_path)
+
+    for candidate in sorted(log_path.parent.glob(f"{log_path.name}.*")):
+        if not candidate.is_file():
+            continue
+        suffix = candidate.name[len(log_path.name) + 1 :]
+        if suffix.isdigit():
+            candidates.append(candidate)
+
+    removed: list[Path] = []
+    failures: list[tuple[Path, str]] = []
+    for path in candidates:
+        try:
+            path.unlink()
+            removed.append(path)
+        except Exception as exc:
+            failures.append((path, str(exc)))
+    return removed, failures
+
+
+def _run_log_cleanup() -> int:
+    load_dotenv()
+    config_path = Path(os.getenv("TTG_CONFIG_PATH", "ttg_config.json"))
+    config = load_app_config(config_path)
+    removed, failures = cleanup_log_files(config)
+    for path in removed:
+        print(f"Removed: {path}")
+    if failures:
+        for path, reason in failures:
+            print(f"Failed to remove {path}: {reason}", file=sys.stderr)
+        return 1
+    if not removed:
+        print("No log files to remove.")
+    return 0
 
 
 def setup_logging(config: AppConfig) -> logging.Logger:
@@ -206,19 +347,24 @@ def setup_logging(config: AppConfig) -> logging.Logger:
     handler: logging.Handler
     fallback_to_stderr = False
     try:
-        log_path = Path(config.log_file)
-        if not log_path.is_absolute():
-            log_path = Path.cwd() / log_path
+        log_path = resolve_log_path(config.log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(
             log_path,
-            maxBytes=1_000_000,
-            backupCount=3,
+            maxBytes=config.log_max_bytes,
+            backupCount=config.log_backup_count,
             encoding="utf-8",
         )
     except Exception:
         handler = logging.StreamHandler(sys.stderr)
         fallback_to_stderr = True
+    handler.addFilter(
+        RedactingLogFilter(
+            redact_secrets=config.log_redact_secrets,
+            redact_phone_numbers=config.log_redact_phone_numbers,
+            sensitive_values=_collect_sensitive_values(),
+        )
+    )
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
@@ -2613,6 +2759,18 @@ async def async_main() -> int:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="ttg",
+        description="Terminal Telegram third-party client (MTProto)",
+    )
+    parser.add_argument(
+        "--clean-logs",
+        action="store_true",
+        help="Delete the configured log file and rotated backups, then exit.",
+    )
+    args = parser.parse_args()
+    if args.clean_logs:
+        return _run_log_cleanup()
     try:
         return asyncio.run(async_main())
     except KeyboardInterrupt:

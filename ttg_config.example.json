@@ -14,10 +14,15 @@
     "edit_older": "ctrl+e",
     "edit_newer": "ctrl+r",
     "cancel_edit": "ctrl+g",
-    "delete_selected": "ctrl+d"
+    "delete_selected": "ctrl+d",
+    "save_selected": "ctrl+w"
   },
   "logging": {
     "file": "logs/ttg.log",
-    "level": "INFO"
+    "level": "INFO",
+    "max_bytes": 1000000,
+    "backup_count": 3,
+    "redact_secrets": true,
+    "redact_phone_numbers": true
   }
 }
