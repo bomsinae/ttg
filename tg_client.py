@@ -1925,6 +1925,19 @@ class TerminalTelegramTUI:
                 self.needs_redraw = True
             return
 
+        if key == curses.KEY_HOME:
+            if self.input_cursor != 0:
+                self.input_cursor = 0
+                self.needs_redraw = True
+            return
+
+        if key == curses.KEY_END:
+            end_pos = len(self.input_buffer)
+            if self.input_cursor != end_pos:
+                self.input_cursor = end_pos
+                self.needs_redraw = True
+            return
+
         if key == self.key_newline:
             if (
                 self.search_query

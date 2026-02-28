@@ -151,6 +151,17 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.input_buffer, "aXb")
         self.assertEqual(app.input_cursor, 2)
 
+    async def test_home_end_move_cursor_to_start_and_end(self) -> None:
+        app = make_app()
+        app.input_buffer = "abcd"
+        app.input_cursor = 2
+
+        await app.handle_chat_key(curses.KEY_HOME)
+        self.assertEqual(app.input_cursor, 0)
+
+        await app.handle_chat_key(curses.KEY_END)
+        self.assertEqual(app.input_cursor, len("abcd"))
+
     async def test_backspace_uses_cursor_position(self) -> None:
         app = make_app()
         app.input_buffer = "abcd"
