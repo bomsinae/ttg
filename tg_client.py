@@ -725,22 +725,40 @@ class TerminalTelegramTUI:
 
         self.needs_redraw = True
 
-    def _editable_outgoing_entries(self) -> list[ChatEntry]:
+    def _selectable_entries(self) -> list[ChatEntry]:
         entries: list[ChatEntry] = []
         for entry in reversed(self.chat_entries):
-            if not entry.is_me or entry.msg_id is None:
+            if entry.msg_id is None:
                 continue
             entries.append(entry)
         return entries
 
-    def _cycle_edit_outgoing(self, *, older: bool) -> None:
+    def _selected_entry_status(self, entry: ChatEntry) -> str:
+        if entry.has_media:
+            if entry.is_me:
+                return "Selected media (^W save | ^D delete)"
+            return "Selected media (^W save)"
+        if entry.is_me:
+            return "Editing selected message"
+        return "Selected message (read-only)"
+
+    def _set_input_for_selected_entry(self, entry: ChatEntry) -> None:
+        if entry.is_me:
+            self._set_input_buffer(entry.text)
+            return
+        if self.current_dialog is None:
+            self._set_input_buffer("")
+            return
+        self._set_input_buffer(self.draft_by_chat.get(self.current_dialog.id, ""))
+
+    def _cycle_message_selection(self, *, older: bool) -> None:
         if self.current_dialog is None:
             self._set_status("No active dialog.")
             return
 
-        editable_entries = self._editable_outgoing_entries()
-        if not editable_entries:
-            self._set_status("No sent message found.")
+        selectable_entries = self._selectable_entries()
+        if not selectable_entries:
+            self._set_status("No selectable message found.")
             return
 
         if self.editing_msg_id is None:
@@ -749,16 +767,16 @@ class TerminalTelegramTUI:
         target_idx = 0
         if self.editing_msg_id is not None:
             current_idx = -1
-            for idx, entry in enumerate(editable_entries):
+            for idx, entry in enumerate(selectable_entries):
                 if entry.msg_id == self.editing_msg_id:
                     current_idx = idx
                     break
 
             if current_idx >= 0:
                 if older:
-                    if current_idx + 1 >= len(editable_entries):
-                        current = editable_entries[current_idx]
-                        self._set_input_buffer(current.text)
+                    if current_idx + 1 >= len(selectable_entries):
+                        current = selectable_entries[current_idx]
+                        self._set_input_for_selected_entry(current)
                         self.chat_scroll_offset = 0
                         self.needs_redraw = True
                         self._set_status("Already at oldest selectable message")
@@ -766,24 +784,21 @@ class TerminalTelegramTUI:
                     target_idx = current_idx + 1
                 else:
                     if current_idx == 0:
-                        current = editable_entries[current_idx]
-                        self._set_input_buffer(current.text)
+                        current = selectable_entries[current_idx]
+                        self._set_input_for_selected_entry(current)
                         self.chat_scroll_offset = 0
                         self.needs_redraw = True
                         self._set_status("Already at newest selectable message")
                         return
                     target_idx = current_idx - 1
 
-        target = editable_entries[target_idx]
+        target = selectable_entries[target_idx]
 
         self.editing_msg_id = target.msg_id
-        self._set_input_buffer(target.text)
+        self._set_input_for_selected_entry(target)
         self._ensure_selected_message_visible()
         self.needs_redraw = True
-        if target.is_media:
-            self._set_status("Selected media (Ctrl+W save | Ctrl+D delete)")
-        else:
-            self._set_status("Editing selected message")
+        self._set_status(self._selected_entry_status(target))
 
     def _request_save_current_editing(self) -> None:
         if self.current_dialog is None:
@@ -986,12 +1001,15 @@ class TerminalTelegramTUI:
             return
 
         if self.editing_msg_id is None:
-            self._set_status("Select a sent message first (Ctrl+E/Ctrl+R).")
+            self._set_status("Select a message first (Ctrl+E/Ctrl+R).")
             return
 
         entry = self._entry_by_id(self.editing_msg_id)
-        if entry is None or not entry.is_me:
+        if entry is None:
             self._set_status("Selected message is unavailable.")
+            return
+        if not entry.is_me:
+            self._set_status("Only your messages can be deleted.")
             return
 
         self.delete_confirm_msg_id = self.editing_msg_id
@@ -1375,7 +1393,18 @@ class TerminalTelegramTUI:
         edit_msg_id = self.editing_msg_id
         if edit_msg_id is not None:
             selected = self._entry_by_id(edit_msg_id)
-            if selected is not None and selected.is_media:
+            if selected is None:
+                self._set_status("Selected message is unavailable.")
+                return
+            if not selected.is_me:
+                if selected.has_media:
+                    self._set_status(
+                        "Selected message is read-only. Use Ctrl+W to save media"
+                    )
+                else:
+                    self._set_status("Only your messages can be edited.")
+                return
+            if selected.is_media:
                 self._set_status(
                     "Selected media cannot be edited. Use Ctrl+W to save or Ctrl+D to delete"
                 )
@@ -1779,11 +1808,11 @@ class TerminalTelegramTUI:
             return
 
         if key == self.key_edit_older:
-            self._cycle_edit_outgoing(older=True)
+            self._cycle_message_selection(older=True)
             return
 
         if key == self.key_edit_newer:
-            self._cycle_edit_outgoing(older=False)
+            self._cycle_message_selection(older=False)
             return
 
         if key == self.key_cancel_edit:
@@ -1803,6 +1832,25 @@ class TerminalTelegramTUI:
                 self.chat_scroll_offset = 0
                 self.needs_redraw = True
                 return
+
+            if self.editing_msg_id is not None:
+                selected = self._entry_by_id(self.editing_msg_id)
+                if selected is None:
+                    self.editing_msg_id = None
+                    self.delete_confirm_msg_id = None
+                    self.needs_redraw = True
+                elif not selected.is_me:
+                    self.editing_msg_id = None
+                    self.delete_confirm_msg_id = None
+                    if self.current_dialog is not None:
+                        self._set_input_buffer(
+                            self.draft_by_chat.get(self.current_dialog.id, "")
+                        )
+                    else:
+                        self._set_input_buffer("")
+                    self.needs_redraw = True
+                    self._set_status("Input mode")
+                    return
 
             cmd = self.input_buffer.strip()
             if cmd in ("/s", "/search"):
@@ -1862,12 +1910,12 @@ class TerminalTelegramTUI:
             ):
                 self._set_input_buffer("")
                 self._sync_current_draft()
-                self._cycle_edit_outgoing(older=True)
+                self._cycle_message_selection(older=True)
                 return
             if cmd in ("/newer",):
                 self._set_input_buffer("")
                 self._sync_current_draft()
-                self._cycle_edit_outgoing(older=False)
+                self._cycle_message_selection(older=False)
                 return
             if cmd in (
                 "/delete",
@@ -2323,10 +2371,16 @@ class TerminalTelegramTUI:
 
         if info_rows:
             if self.editing_msg_id is not None:
-                guide = (
-                    "EDIT | Enter: save | "
-                    "^E: older | ^R: newer | ^G: cancel | ^W: save media | ^D: delete"
-                )
+                selected = self._entry_by_id(self.editing_msg_id)
+                guide_parts = ["SELECT"]
+                if selected is not None and selected.is_me and not selected.is_media:
+                    guide_parts.append("Enter: save")
+                guide_parts.extend(["^E: older", "^R: newer", "^G: cancel"])
+                if selected is not None and selected.has_media:
+                    guide_parts.append("^W: save media")
+                if selected is not None and selected.is_me:
+                    guide_parts.append("^D: delete")
+                guide = " | ".join(guide_parts)
             elif self.search_query:
                 if self.search_match_msg_ids:
                     guide = (

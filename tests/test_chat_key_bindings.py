@@ -246,6 +246,143 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_chat_key("\x05")  # Ctrl+E
         self.assertEqual(app.editing_msg_id, 77)
 
+    async def test_ctrl_e_can_select_incoming_message(self) -> None:
+        app = make_app()
+        app.input_buffer = "draft text"
+        app.input_cursor = len(app.input_buffer)
+        app.chat_entries = [
+            ChatEntry(
+                sender="me",
+                text="mine older",
+                when=datetime.now(),
+                is_me=True,
+                msg_id=10,
+            ),
+            ChatEntry(
+                sender="other",
+                text="incoming newer",
+                when=datetime.now(),
+                is_me=False,
+                msg_id=11,
+            ),
+        ]
+
+        await app.handle_chat_key("\x05")  # Ctrl+E
+        self.assertEqual(app.editing_msg_id, 11)
+        self.assertEqual(app.status, "Selected message (read-only)")
+        self.assertEqual(app.input_buffer, "draft text")
+
+    async def test_enter_on_incoming_selection_returns_to_input_mode(self) -> None:
+        app = make_app()
+        app.chat_entries = [
+            ChatEntry(
+                sender="other",
+                text="incoming",
+                when=datetime.now(),
+                is_me=False,
+                msg_id=51,
+            ),
+        ]
+        app.editing_msg_id = 51
+        app.draft_by_chat[100] = "draft text"
+        app.input_buffer = "incoming"
+        app.input_cursor = len(app.input_buffer)
+        called: list[bool] = []
+        app._request_send_current = lambda: called.append(True)  # type: ignore[assignment]
+
+        await app.handle_chat_key("\n")
+        self.assertIsNone(app.editing_msg_id)
+        self.assertEqual(app.input_buffer, "draft text")
+        self.assertEqual(app.input_cursor, len("draft text"))
+        self.assertEqual(called, [])
+        self.assertEqual(app.status, "Input mode")
+
+    async def test_ctrl_w_saves_selected_incoming_media_message(self) -> None:
+        app = make_app()
+        app.chat_entries = [
+            ChatEntry(
+                sender="other",
+                text="<photo: a.jpg>",
+                when=datetime.now(),
+                is_me=False,
+                msg_id=91,
+                has_media=True,
+                is_media=True,
+            ),
+        ]
+        app.editing_msg_id = 91
+        captured: dict[str, object] = {}
+
+        def fake_save_media(msg_id: int, output_path: str | None = None):
+            captured["msg_id"] = msg_id
+            captured["output_path"] = output_path
+
+            async def _done():
+                return None
+
+            return _done()
+
+        def fake_request(coro, *, error_prefix: str):
+            captured["error_prefix"] = error_prefix
+            coro.close()
+
+        app.save_message_media = fake_save_media  # type: ignore[assignment]
+        app._request_message_action = fake_request  # type: ignore[assignment]
+
+        await app.handle_chat_key("\x17")  # Ctrl+W
+        self.assertEqual(captured.get("msg_id"), 91)
+        self.assertIsNone(captured.get("output_path"))
+        self.assertEqual(captured.get("error_prefix"), "Media save failed")
+
+    async def test_send_current_message_rejects_incoming_message_edit(self) -> None:
+        app = make_app()
+        app.chat_entries = [
+            ChatEntry(
+                sender="other",
+                text="incoming",
+                when=datetime.now(),
+                is_me=False,
+                msg_id=22,
+            ),
+        ]
+        app.editing_msg_id = 22
+        app.input_buffer = "try edit"
+        app.input_cursor = len(app.input_buffer)
+
+        class DummyClient:
+            def __init__(self) -> None:
+                self.called = False
+
+            async def edit_message(self, entity, msg_id, text):
+                self.called = True
+                return None
+
+        dummy_client = DummyClient()
+        app.client = dummy_client  # type: ignore[assignment]
+
+        await app.send_current_message()
+        self.assertFalse(dummy_client.called)
+        self.assertEqual(app.status, "Only your messages can be edited.")
+        self.assertEqual(app.editing_msg_id, 22)
+        self.assertEqual(app.input_buffer, "try edit")
+
+    async def test_ctrl_d_rejects_incoming_message_delete(self) -> None:
+        app = make_app()
+        app.chat_entries = [
+            ChatEntry(
+                sender="other",
+                text="incoming",
+                when=datetime.now(),
+                is_me=False,
+                msg_id=33,
+            ),
+        ]
+        app.editing_msg_id = 33
+
+        await app.handle_chat_key("\x04")  # Ctrl+D
+        self.assertIsNone(app.delete_confirm_msg_id)
+        self.assertEqual(app.status, "Only your messages can be deleted.")
+
     async def test_send_current_message_treats_not_modified_as_success(self) -> None:
         app = make_app()
         app.current_dialog = SimpleNamespace(id=100, name="test", entity=object())
