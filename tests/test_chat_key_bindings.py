@@ -2,10 +2,10 @@ import asyncio
 import contextlib
 import unittest
 import curses
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from tg_client import ChatEntry, TerminalTelegramTUI
+from tg_client import ChatEntry, TerminalTelegramTUI, safe_local_time
 
 
 class DummyStdScr:
@@ -468,6 +468,31 @@ class DialogKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
 
         await app.handle_dialog_key(curses.KEY_NPAGE)
         self.assertEqual(app.selected_idx, 5)
+
+    async def test_dialog_last_message_time_is_right_side_value_source(self) -> None:
+        app = make_dialog_app(dialog_count=0)
+        ts = datetime.now().astimezone().replace(hour=9, minute=5, second=0, microsecond=0)
+        dialog = SimpleNamespace(message=SimpleNamespace(date=ts))
+
+        self.assertEqual(
+            app._dialog_last_message_time(dialog),
+            safe_local_time(ts).strftime("%H:%M"),
+        )
+
+    async def test_dialog_last_message_time_non_today_uses_date_and_weekday(self) -> None:
+        app = make_dialog_app(dialog_count=0)
+        ts = (datetime.now().astimezone() - timedelta(days=1)).replace(
+            hour=9,
+            minute=5,
+            second=0,
+            microsecond=0,
+        )
+        dialog = SimpleNamespace(message=SimpleNamespace(date=ts))
+
+        self.assertEqual(
+            app._dialog_last_message_time(dialog),
+            safe_local_time(ts).strftime("%m-%d (%a)"),
+        )
 
 
 if __name__ == "__main__":

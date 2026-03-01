@@ -2180,6 +2180,20 @@ class TerminalTelegramTUI:
         text = text.replace("\n", " ")
         return ellipsize(text, max_width)
 
+    def _dialog_last_message_time(self, dialog: Dialog) -> str:
+        last_msg = getattr(dialog, "message", None)
+        if last_msg is None:
+            return ""
+        last_date = getattr(last_msg, "date", None)
+        if last_date is None:
+            return ""
+        local_dt = safe_local_time(last_date)
+        tzinfo = getattr(local_dt, "tzinfo", None)
+        now_dt = datetime.now(tzinfo) if tzinfo is not None else datetime.now()
+        if local_dt.date() == now_dt.date():
+            return local_dt.strftime("%H:%M")
+        return local_dt.strftime("%m-%d (%a)")
+
     def _box_top_line(
         self,
         inner_width: int,
@@ -2249,6 +2263,7 @@ class TerminalTelegramTUI:
                 dialog = self.dialogs[idx]
                 name = dialog.name.replace("\n", " ")
                 unread = dialog.unread_count
+                time_text = self._dialog_last_message_time(dialog)
                 badge = f"[{unread}] " if unread > 0 else ""
                 badge_pad = " " * max(0, badge_col_width - display_width(badge))
                 is_selected = idx == self.selected_idx
@@ -2279,7 +2294,20 @@ class TerminalTelegramTUI:
                         badge_attr = self.badge_unread_attr
 
                 self._write(y, 0, badge_text, badge_attr)
-                self._write(y, badge_width, name, name_attr)
+                line_width = max(0, width - 1 - badge_width)
+                time_width = display_width(time_text) if time_text else 0
+                name_max_width = line_width
+                if time_text and line_width > time_width:
+                    name_max_width = max(1, line_width - time_width - 1)
+                name_text = ellipsize(name, max(1, name_max_width))
+                self._write(y, badge_width, name_text, name_attr)
+                if time_text and line_width > time_width:
+                    time_x = max(
+                        badge_width + display_width(name_text) + 1,
+                        (width - 1) - time_width,
+                    )
+                    time_attr = curses.A_DIM if not is_selected else curses.A_REVERSE
+                    self._write(y, time_x, time_text, time_attr)
                 if y + 1 < height:
                     self._write(y + 1, 0, msg_line, msg_attr)
                 if y + 2 < height:
