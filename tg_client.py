@@ -2320,7 +2320,8 @@ class TerminalTelegramTUI:
             return []
 
         rendered: list[tuple[str, bool, bool, int | None]] = []
-        inner_max = max(1, width - 4)
+        bubble_side_margin = 5
+        inner_max = max(1, width - 4 - bubble_side_margin)
         prev_day: Any | None = None
         for idx, entry in enumerate(self.chat_entries):
             day = entry.when.date()
@@ -2553,7 +2554,8 @@ class TerminalTelegramTUI:
             x = 0
             if is_me:
                 content_width = max(1, width - 1)
-                x = max(0, content_width - display_width(line))
+                min_left_margin = 5 if content_width > 5 else 0
+                x = max(min_left_margin, content_width - display_width(line))
             self._write(body_top + idx, x, line, attr)
 
         if info_rows:

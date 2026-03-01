@@ -5,7 +5,7 @@ import curses
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from tg_client import ChatEntry, TerminalTelegramTUI, safe_local_time
+from tg_client import ChatEntry, TerminalTelegramTUI, display_width, safe_local_time
 
 
 class DummyStdScr:
@@ -170,6 +170,32 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_chat_key(curses.KEY_BACKSPACE)
         self.assertEqual(app.input_buffer, "acd")
         self.assertEqual(app.input_cursor, 1)
+
+    async def test_render_chat_lines_keeps_five_column_side_margin_for_bubbles(self) -> None:
+        app = make_app()
+        app.chat_entries = [
+            ChatEntry(
+                sender="other",
+                text="x" * 200,
+                when=datetime.now(),
+                is_me=False,
+                msg_id=1,
+            ),
+            ChatEntry(
+                sender="me",
+                text="y" * 200,
+                when=datetime.now(),
+                is_me=True,
+                msg_id=2,
+            ),
+        ]
+
+        width = 60
+        lines = app._render_chat_lines(width)
+        max_bubble_width = max(
+            display_width(line) for line, _, _, msg_id in lines if msg_id is not None
+        )
+        self.assertLessEqual(max_bubble_width, width - 5)
 
     async def test_file_command_dispatches_send_file_action(self) -> None:
         app = make_app()
