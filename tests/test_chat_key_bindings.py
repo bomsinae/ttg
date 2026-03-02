@@ -455,6 +455,159 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.input_cursor, len("draft"))
         self.assertEqual(app.status, "Message edited")
 
+    async def test_on_new_message_appends_outgoing_from_other_device(self) -> None:
+        app = make_app()
+        app.mode = "chat"
+        app.current_dialog = SimpleNamespace(id=100, name="test")
+        app.chat_entries = [
+            ChatEntry(
+                sender="me",
+                text="existing",
+                when=datetime.now(),
+                is_me=True,
+                msg_id=10,
+            )
+        ]
+
+        class DummyEvent:
+            chat_id = 100
+            id = 11
+            message = SimpleNamespace(
+                id=11,
+                out=True,
+                message="from other device",
+                date=datetime.now(),
+                media=None,
+                sender_id=None,
+                sender=None,
+            )
+
+            async def get_sender(self):
+                return None
+
+            async def get_chat(self):
+                return None
+
+        await app.on_new_message(DummyEvent())
+        self.assertEqual(len(app.chat_entries), 2)
+        self.assertTrue(app.chat_entries[-1].is_me)
+        self.assertEqual(app.chat_entries[-1].text, "from other device")
+
+    async def test_on_new_message_ignores_duplicate_msg_id(self) -> None:
+        app = make_app()
+        app.mode = "chat"
+        app.current_dialog = SimpleNamespace(id=100, name="test")
+        app.chat_entries = [
+            ChatEntry(
+                sender="me",
+                text="existing",
+                when=datetime.now(),
+                is_me=True,
+                msg_id=11,
+            )
+        ]
+
+        class DummyEvent:
+            chat_id = 100
+            id = 11
+            message = SimpleNamespace(
+                id=11,
+                out=True,
+                message="duplicate",
+                date=datetime.now(),
+                media=None,
+                sender_id=None,
+                sender=None,
+            )
+
+            async def get_sender(self):
+                return None
+
+            async def get_chat(self):
+                return None
+
+        await app.on_new_message(DummyEvent())
+        self.assertEqual(len(app.chat_entries), 1)
+
+    async def test_on_message_read_updates_outbox_receipts_for_current_chat(self) -> None:
+        app = make_app()
+        app.mode = "chat"
+        app.current_dialog = SimpleNamespace(id=100, name="test")
+        app.chat_entries = [
+            ChatEntry(
+                sender="me",
+                text="hello",
+                when=datetime.now(),
+                is_me=True,
+                msg_id=21,
+                read=False,
+            ),
+            ChatEntry(
+                sender="other",
+                text="reply",
+                when=datetime.now(),
+                is_me=False,
+                msg_id=22,
+                read=False,
+            ),
+        ]
+
+        event = SimpleNamespace(chat_id=100, max_id=21, outbox=True, inbox=False)
+        await app.on_message_read(event)  # type: ignore[arg-type]
+
+        self.assertEqual(app.read_outbox_max_by_chat.get(100), 21)
+        self.assertTrue(app.chat_entries[0].read)
+        self.assertFalse(app.chat_entries[1].read)
+        self.assertTrue(app.dialog_refresh_requested)
+
+    async def test_on_message_read_ignores_inbox_reads(self) -> None:
+        app = make_app()
+        app.mode = "chat"
+        app.current_dialog = SimpleNamespace(id=100, name="test")
+        app.chat_entries = [
+            ChatEntry(
+                sender="me",
+                text="hello",
+                when=datetime.now(),
+                is_me=True,
+                msg_id=30,
+                read=False,
+            ),
+        ]
+
+        event = SimpleNamespace(chat_id=100, max_id=30, outbox=False, inbox=True)
+        await app.on_message_read(event)  # type: ignore[arg-type]
+
+        self.assertEqual(app.read_outbox_max_by_chat.get(100), None)
+        self.assertFalse(app.chat_entries[0].read)
+
+    async def test_on_new_message_other_chat_outgoing_does_not_raise_unread_badge(self) -> None:
+        app = make_app()
+        app.mode = "chat"
+        app.current_dialog = SimpleNamespace(id=100, name="test")
+
+        class DummyEvent:
+            chat_id = 200
+            id = 40
+            message = SimpleNamespace(
+                id=40,
+                out=True,
+                message="sent elsewhere",
+                date=datetime.now(),
+                media=None,
+                sender_id=None,
+                sender=None,
+            )
+
+            async def get_sender(self):
+                return None
+
+            async def get_chat(self):
+                return None
+
+        await app.on_new_message(DummyEvent())
+        self.assertEqual(app.other_chat_new_counts.get(200), None)
+
     async def test_request_message_action_closes_coro_when_busy(self) -> None:
         app = make_app()
         app.message_action_task = asyncio.create_task(asyncio.sleep(1))
@@ -519,6 +672,56 @@ class DialogKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
             app._dialog_last_message_time(dialog),
             safe_local_time(ts).strftime("%m-%d (%a)"),
         )
+
+    async def test_refresh_dialogs_retries_and_keeps_running_on_transient_errors(self) -> None:
+        app = make_dialog_app(dialog_count=1)
+
+        class RpcCallFailError(Exception):
+            pass
+
+        class DummyClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def iter_dialogs(self, limit=120):
+                self.calls += 1
+
+                async def _gen():
+                    raise RpcCallFailError(
+                        "Telegram is having internal issues, please try again later."
+                    )
+                    yield  # pragma: no cover
+
+                return _gen()
+
+        client = DummyClient()
+        app.client = client  # type: ignore[assignment]
+        app._dialog_refresh_retry_delay = lambda exc, attempt: 0.0  # type: ignore[assignment]
+        before_ids = [dialog.id for dialog in app.dialogs]
+
+        await app.refresh_dialogs()
+
+        after_ids = [dialog.id for dialog in app.dialogs]
+        self.assertEqual(after_ids, before_ids)
+        self.assertEqual(client.calls, 3)
+        self.assertTrue(app.dialog_refresh_requested)
+        self.assertIn("retrying", app.status.lower())
+
+    async def test_refresh_dialogs_raises_non_transient_error(self) -> None:
+        app = make_dialog_app(dialog_count=1)
+
+        class DummyClient:
+            def iter_dialogs(self, limit=120):
+                async def _gen():
+                    raise RuntimeError("hard failure")
+                    yield  # pragma: no cover
+
+                return _gen()
+
+        app.client = DummyClient()  # type: ignore[assignment]
+
+        with self.assertRaises(RuntimeError):
+            await app.refresh_dialogs()
 
 
 if __name__ == "__main__":

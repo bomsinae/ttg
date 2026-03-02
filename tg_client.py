@@ -1289,11 +1289,60 @@ class TerminalTelegramTUI:
         if self.dialog_top < 0:
             self.dialog_top = 0
 
+    def _is_transient_dialog_refresh_error(self, exc: Exception) -> bool:
+        name = exc.__class__.__name__
+        lowered = str(exc).lower()
+        if name in {
+            "RpcCallFailError",
+            "ServerError",
+            "TimedOutError",
+            "TimeoutError",
+            "FloodWaitError",
+        }:
+            return True
+        transient_tokens = (
+            "internal issues",
+            "temporarily unavailable",
+            "timeout",
+            "timed out",
+            "try again later",
+            "flood wait",
+        )
+        return any(token in lowered for token in transient_tokens)
+
+    def _dialog_refresh_retry_delay(self, exc: Exception, attempt: int) -> float:
+        flood_wait = getattr(exc, "seconds", None)
+        if isinstance(flood_wait, int) and flood_wait > 0:
+            return float(min(15, flood_wait))
+        return min(3.0, 0.5 * attempt)
+
     async def refresh_dialogs(self, limit: int = 120, quiet: bool = False) -> None:
         preserve_id = self._selected_dialog_id()
         dialogs: list[Dialog] = []
-        async for dialog in self.client.iter_dialogs(limit=limit):
-            dialogs.append(dialog)
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            dialogs = []
+            try:
+                async for dialog in self.client.iter_dialogs(limit=limit):
+                    dialogs.append(dialog)
+                break
+            except Exception as exc:
+                if not self._is_transient_dialog_refresh_error(exc):
+                    raise
+                self.logger.warning(
+                    "Transient dialog refresh failure (attempt %s/%s): %s",
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                if attempt >= max_attempts:
+                    self.last_dialog_refresh = time.monotonic()
+                    self.dialog_refresh_requested = True
+                    self._set_status(
+                        "Telegram server is busy. Retrying dialog refresh shortly..."
+                    )
+                    return
+                await asyncio.sleep(self._dialog_refresh_retry_delay(exc, attempt))
 
         self.dialogs = dialogs
         for dialog in dialogs:
@@ -1770,26 +1819,30 @@ class TerminalTelegramTUI:
 
     async def on_new_message(self, event: events.NewMessage.Event) -> None:
         self.dialog_refresh_requested = True
+        chat_id = event.chat_id if isinstance(event.chat_id, int) else None
+        entry = self._entry_from_message(event.message, chat_id=chat_id)
         if (
             self.mode == "chat"
             and self.current_dialog is not None
             and event.chat_id == self.current_dialog.id
         ):
-            entry = self._entry_from_message(event.message, chat_id=self.current_dialog.id)
             if not entry.is_me:
                 entry.sender = entity_label(
                     await event.get_sender(),
                     fallback=entry.sender,
                 )
-            self.chat_entries.append(entry)
+            if entry.msg_id is None or not any(
+                item.msg_id == entry.msg_id for item in self.chat_entries
+            ):
+                self.chat_entries.append(entry)
             self._rebuild_search_matches(preserve_focus=True)
-            self._schedule_ack_read(self.current_dialog, max_id=event.id)
+            if not entry.is_me:
+                self._schedule_ack_read(self.current_dialog, max_id=event.id)
             self._set_status(
                 f"{self.current_dialog.name} ({self.current_dialog.id}) | Enter: send | Ctrl+N: newline | Esc: dialogs"
             )
         else:
-            chat_id = event.chat_id if isinstance(event.chat_id, int) else None
-            if chat_id is not None:
+            if chat_id is not None and not entry.is_me:
                 self.other_chat_new_counts[chat_id] = (
                     self.other_chat_new_counts.get(chat_id, 0) + 1
                 )
@@ -1809,7 +1862,30 @@ class TerminalTelegramTUI:
                             dialog_name = f"id:{chat_id}"
                     self.other_chat_names[chat_id] = dialog_name.replace("\n", " ")
             self.needs_redraw = True
-            self._set_status("New incoming message. Press r to refresh dialogs now.")
+            if not entry.is_me:
+                self._set_status("New message in another chat.")
+
+    async def on_message_read(self, event: events.MessageRead.Event) -> None:
+        chat_id = getattr(event, "chat_id", None)
+        max_id = getattr(event, "max_id", None)
+        if not isinstance(chat_id, int) or not isinstance(max_id, int) or max_id <= 0:
+            return
+
+        outbox = getattr(event, "outbox", None)
+        inbox = getattr(event, "inbox", None)
+        if outbox is False:
+            return
+        if outbox is None and inbox is True:
+            return
+
+        prev = self.read_outbox_max_by_chat.get(chat_id, 0)
+        if max_id > prev:
+            self.read_outbox_max_by_chat[chat_id] = max_id
+
+        if self.current_dialog is not None and self.current_dialog.id == chat_id:
+            self._apply_read_receipts(chat_id)
+            self.needs_redraw = True
+        self.dialog_refresh_requested = True
 
     async def handle_dialog_key(self, key: Any) -> None:
         if key == curses.KEY_DOWN:
@@ -2683,12 +2759,10 @@ class TerminalTelegramTUI:
             await self.handle_input()
 
             now = time.monotonic()
-            if (
-                self.mode == "chat"
-                and now - self.last_dialog_refresh >= self.auto_refresh_interval
-            ):
+            if now - self.last_dialog_refresh >= self.auto_refresh_interval:
                 self.dialog_refresh_requested = True
-                self._request_peer_status_refresh(force=False)
+                if self.mode == "chat":
+                    self._request_peer_status_refresh(force=False)
 
             if self.dialog_refresh_requested and now - self.last_dialog_refresh >= 1.0:
                 self._request_refresh(quiet=self.mode == "chat")
@@ -2792,7 +2866,8 @@ async def async_main() -> int:
     try:
         stdscr = setup_curses()
         app = TerminalTelegramTUI(client, stdscr, config=config, logger=logger)
-        client.add_event_handler(app.on_new_message, events.NewMessage(incoming=True))
+        client.add_event_handler(app.on_new_message, events.NewMessage())
+        client.add_event_handler(app.on_message_read, events.MessageRead())
         await app.run()
     finally:
         cleanup_curses(stdscr)
