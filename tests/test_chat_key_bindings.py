@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import unittest
 import curses
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -705,7 +706,31 @@ class DialogKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after_ids, before_ids)
         self.assertEqual(client.calls, 3)
         self.assertTrue(app.dialog_refresh_requested)
-        self.assertIn("retrying", app.status.lower())
+        self.assertIn("retry in", app.status.lower())
+        self.assertGreater(app.dialog_refresh_backoff_until, time.monotonic())
+        self.assertEqual(app.dialog_refresh_failures, 1)
+
+    async def test_request_refresh_respects_backoff_unless_forced(self) -> None:
+        app = make_dialog_app(dialog_count=1)
+        app.dialog_refresh_backoff_until = time.monotonic() + 60.0
+        calls: list[str] = []
+
+        class DummyTask:
+            def done(self) -> bool:
+                return False
+
+        def fake_start_task(coro, *, error_prefix: str, on_done=None):
+            calls.append(error_prefix)
+            coro.close()
+            return DummyTask()
+
+        app._start_task = fake_start_task  # type: ignore[assignment]
+
+        app._request_refresh(quiet=True)
+        self.assertEqual(calls, [])
+
+        app._request_refresh(quiet=True, force=True)
+        self.assertEqual(calls, ["Dialog refresh failed"])
 
     async def test_refresh_dialogs_raises_non_transient_error(self) -> None:
         app = make_dialog_app(dialog_count=1)

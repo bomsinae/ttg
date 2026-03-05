@@ -538,6 +538,8 @@ class TerminalTelegramTUI:
 
         self.dialog_refresh_requested = False
         self.last_dialog_refresh = 0.0
+        self.dialog_refresh_backoff_until = 0.0
+        self.dialog_refresh_failures = 0
         self.info_bar_attr = curses.A_REVERSE
         self.badge_unread_attr = curses.A_BOLD
         self.badge_muted_attr = curses.A_DIM
@@ -662,8 +664,11 @@ class TerminalTelegramTUI:
         task.add_done_callback(_done)
         return task
 
-    def _request_refresh(self, quiet: bool = False) -> None:
+    def _request_refresh(self, quiet: bool = False, force: bool = False) -> None:
         if self.refresh_task is not None and not self.refresh_task.done():
+            return
+        now = time.monotonic()
+        if not force and now < self.dialog_refresh_backoff_until:
             return
 
         def _clear() -> None:
@@ -1329,21 +1334,41 @@ class TerminalTelegramTUI:
             except Exception as exc:
                 if not self._is_transient_dialog_refresh_error(exc):
                     raise
-                self.logger.warning(
-                    "Transient dialog refresh failure (attempt %s/%s): %s",
-                    attempt,
-                    max_attempts,
-                    exc,
-                )
+                if attempt < max_attempts:
+                    self.logger.debug(
+                        "Transient dialog refresh failure (attempt %s/%s): %s",
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                else:
+                    self.logger.warning(
+                        "Transient dialog refresh failure (attempt %s/%s): %s",
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
                 if attempt >= max_attempts:
+                    self.dialog_refresh_failures += 1
+                    backoff_sec = min(
+                        30.0,
+                        float(2 ** min(5, self.dialog_refresh_failures)),
+                    )
+                    self.dialog_refresh_backoff_until = time.monotonic() + backoff_sec
                     self.last_dialog_refresh = time.monotonic()
                     self.dialog_refresh_requested = True
+                    self.logger.warning(
+                        "Dialog refresh paused for %.1fs after repeated transient failures",
+                        backoff_sec,
+                    )
                     self._set_status(
-                        "Telegram server is busy. Retrying dialog refresh shortly..."
+                        f"Telegram server is busy. Retry in {int(backoff_sec)}s..."
                     )
                     return
                 await asyncio.sleep(self._dialog_refresh_retry_delay(exc, attempt))
 
+        self.dialog_refresh_failures = 0
+        self.dialog_refresh_backoff_until = 0.0
         self.dialogs = dialogs
         for dialog in dialogs:
             chat_id = dialog.id
@@ -1927,7 +1952,7 @@ class TerminalTelegramTUI:
             return
 
         if key in ("r", "R"):
-            self._request_refresh(quiet=False)
+            self._request_refresh(quiet=False, force=True)
             return
 
     async def handle_chat_key(self, key: Any) -> None:
