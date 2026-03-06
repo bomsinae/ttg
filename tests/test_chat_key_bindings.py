@@ -39,6 +39,16 @@ def make_dialog_app(dialog_count: int = 20) -> TerminalTelegramTUI:
 
 
 class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_status_suppresses_getdialogs_internal_issue_error(self) -> None:
+        app = make_app()
+        app._set_status("stable")
+        app._set_status(
+            "Dialog refresh failed: Telegram is having internal issues RpcCallFailError: "
+            "Telegram is having internal issues, please try again later. "
+            "(caused by GetDialogsRequest)"
+        )
+        self.assertEqual(app.status, "stable")
+
     async def test_esc_clears_search_before_leaving_chat(self) -> None:
         app = make_app()
         app.search_query = "hello"
@@ -676,6 +686,7 @@ class DialogKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_refresh_dialogs_retries_and_keeps_running_on_transient_errors(self) -> None:
         app = make_dialog_app(dialog_count=1)
+        app._set_status("keep")
 
         class RpcCallFailError(Exception):
             pass
@@ -706,7 +717,7 @@ class DialogKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after_ids, before_ids)
         self.assertEqual(client.calls, 3)
         self.assertTrue(app.dialog_refresh_requested)
-        self.assertIn("retry in", app.status.lower())
+        self.assertEqual(app.status, "keep")
         self.assertGreater(app.dialog_refresh_backoff_until, time.monotonic())
         self.assertEqual(app.dialog_refresh_failures, 1)
 

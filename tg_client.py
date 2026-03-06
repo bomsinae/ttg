@@ -634,7 +634,14 @@ class TerminalTelegramTUI:
             self.badge_muted_attr = curses.A_DIM
 
     def _set_status(self, value: str) -> None:
-        self.status = value.replace("\n", " ").strip()
+        cleaned = value.replace("\n", " ").strip()
+        lowered = cleaned.lower()
+        if (
+            "getdialogsrequest" in lowered
+            and "internal issues" in lowered
+        ):
+            return
+        self.status = cleaned
         self.status_updated_at = time.monotonic()
         self.needs_redraw = True
 
@@ -655,8 +662,14 @@ class TerminalTelegramTUI:
             except asyncio.CancelledError:
                 pass
             except Exception as exc:  # pragma: no cover
-                self.logger.exception("%s", error_prefix)
-                self._set_status(f"{error_prefix}: {exc}")
+                if (
+                    error_prefix == "Dialog refresh failed"
+                    and self._is_transient_dialog_refresh_error(exc)
+                ):
+                    self.logger.debug("%s: %s", error_prefix, exc)
+                else:
+                    self.logger.exception("%s", error_prefix)
+                    self._set_status(f"{error_prefix}: {exc}")
             if on_done is not None:
                 on_done()
             self.needs_redraw = True
@@ -1360,9 +1373,6 @@ class TerminalTelegramTUI:
                     self.logger.warning(
                         "Dialog refresh paused for %.1fs after repeated transient failures",
                         backoff_sec,
-                    )
-                    self._set_status(
-                        f"Telegram server is busy. Retry in {int(backoff_sec)}s..."
                     )
                     return
                 await asyncio.sleep(self._dialog_refresh_retry_delay(exc, attempt))
