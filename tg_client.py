@@ -21,8 +21,13 @@ import logging
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
+import termios
 import time
+import tty
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -369,6 +374,11 @@ def setup_logging(config: AppConfig) -> logging.Logger:
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
     logger.addHandler(handler)
+    telethon_logger = logging.getLogger("telethon")
+    telethon_logger.handlers.clear()
+    telethon_logger.propagate = False
+    telethon_logger.setLevel(logging.ERROR)
+    telethon_logger.addHandler(handler)
     if fallback_to_stderr:
         logger.warning(
             "Failed to initialize log file '%s'; using stderr logging",
@@ -635,15 +645,16 @@ class TerminalTelegramTUI:
 
     def _set_status(self, value: str) -> None:
         cleaned = value.replace("\n", " ").strip()
-        lowered = cleaned.lower()
-        if (
-            "getdialogsrequest" in lowered
-            and "internal issues" in lowered
-        ):
+        if self._should_suppress_getdialogs_internal_issue_text(cleaned):
             return
         self.status = cleaned
         self.status_updated_at = time.monotonic()
         self.needs_redraw = True
+
+    @staticmethod
+    def _should_suppress_getdialogs_internal_issue_text(text: str) -> bool:
+        lowered = text.lower()
+        return "getdialogsrequest" in lowered and "internal issues" in lowered
 
     def _start_task(
         self,
@@ -666,7 +677,7 @@ class TerminalTelegramTUI:
                     error_prefix == "Dialog refresh failed"
                     and self._is_transient_dialog_refresh_error(exc)
                 ):
-                    self.logger.debug("%s: %s", error_prefix, exc)
+                    self.logger.debug("%s: transient getdialogs failure", error_prefix)
                 else:
                     self.logger.exception("%s", error_prefix)
                     self._set_status(f"{error_prefix}: {exc}")
@@ -900,8 +911,8 @@ class TerminalTelegramTUI:
     def _selected_entry_status(self, entry: ChatEntry) -> str:
         if entry.has_media:
             if entry.is_me:
-                return "Selected media (^W save | ^D delete)"
-            return "Selected media (^W save)"
+                return "Selected media (p preview | ^W save | ^D delete)"
+            return "Selected media (p preview | ^W save)"
         if entry.is_me:
             return "Editing selected message"
         return "Selected message (read-only)"
@@ -985,6 +996,269 @@ class TerminalTelegramTUI:
             self.save_message_media(self.editing_msg_id, None),
             error_prefix="Media save failed",
         )
+
+    async def _preview_current_editing(self) -> None:
+        if self.current_dialog is None:
+            self._set_status("No active dialog.")
+            return
+
+        if self.editing_msg_id is None:
+            self._set_status("Select a message first (Ctrl+E/Ctrl+R).")
+            return
+
+        entry = self._entry_by_id(self.editing_msg_id)
+        if entry is None:
+            self._set_status("Selected message is unavailable.")
+            return
+        if not entry.has_media:
+            self._set_status("Selected message has no media.")
+            return
+
+        dialog = self.current_dialog
+        msg_id = self.editing_msg_id
+        self._set_status("Preparing media preview...")
+        self.draw()
+        try:
+            fetched = await self.client.get_messages(dialog.entity, ids=msg_id)
+        except Exception as exc:  # pragma: no cover
+            self.logger.warning("Preview fetch failed chat=%s msg=%s: %s", dialog.id, msg_id, exc)
+            self._set_status(f"Preview load failed: {exc}")
+            return
+
+        msg: Message | None
+        if isinstance(fetched, list):
+            msg = fetched[0] if fetched else None
+        else:
+            msg = fetched
+        if msg is None:
+            self._set_status("Selected message not found")
+            return
+        if getattr(msg, "media", None) is None:
+            self._set_status("Selected message has no media")
+            return
+
+        with tempfile.TemporaryDirectory(prefix="ttg-preview-") as tmpdir:
+            target = Path(tmpdir)
+            try:
+                saved_path = await self.client.download_media(msg, file=str(target))
+            except Exception as exc:  # pragma: no cover
+                self.logger.warning(
+                    "Preview download failed chat=%s msg=%s target=%s: %s",
+                    dialog.id,
+                    msg_id,
+                    target,
+                    exc,
+                )
+                self._set_status(f"Preview download failed: {exc}")
+                return
+
+            if not saved_path:
+                self._set_status("Preview failed: no output path returned")
+                return
+
+            try:
+                self._show_image_preview(Path(saved_path))
+            except Exception as exc:  # pragma: no cover
+                self.logger.warning(
+                    "Preview render failed chat=%s msg=%s path=%s: %s",
+                    dialog.id,
+                    msg_id,
+                    saved_path,
+                    exc,
+                )
+                self._set_status(f"Preview failed: {exc}")
+                return
+
+        selected = self._entry_by_id(msg_id)
+        if selected is not None:
+            self._set_status(self._selected_entry_status(selected))
+        else:
+            self._set_status("Preview closed")
+
+    @staticmethod
+    def _read_single_terminal_key() -> None:
+        try:
+            fd = sys.stdin.fileno()
+        except Exception:
+            try:
+                input("Press Enter to return...")
+            except EOFError:
+                pass
+            return
+
+        if not os.isatty(fd):
+            try:
+                input("Press Enter to return...")
+            except EOFError:
+                pass
+            return
+
+        old_attrs = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            os.read(fd, 1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+    @staticmethod
+    def _preview_mode_from_env(raw: str | None) -> str:
+        mode = (raw or "auto").strip().lower()
+        if mode in {"auto", "ansi", "sixel"}:
+            return mode
+        return "auto"
+
+    def _should_use_sixel_preview(self) -> bool:
+        mode = self._preview_mode_from_env(os.getenv("TTG_IMAGE_PREVIEW_MODE"))
+        if mode == "ansi":
+            return False
+        if shutil.which("img2sixel") is None:
+            return False
+        if mode == "sixel":
+            return True
+
+        term = os.getenv("TERM", "").lower()
+        if os.getenv("TMUX") or "tmux" in term:
+            return self._tmux_client_supports_sixel()
+        return True
+
+    @staticmethod
+    def _tmux_client_supports_sixel() -> bool:
+        try:
+            result = subprocess.run(
+                ["tmux", "display", "-p", "#{client_termfeatures}"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return False
+        features = (result.stdout or "").strip().lower()
+        return "sixel" in features.split(",")
+
+    def _try_sixel_image_preview(
+        self,
+        image_path: Path,
+        *,
+        term_columns: int,
+        term_lines: int,
+    ) -> bool:
+        if not self._should_use_sixel_preview():
+            return False
+
+        img2sixel = shutil.which("img2sixel")
+        if not img2sixel:
+            return False
+
+        max_px_w = max(64, (max(8, term_columns - 2)) * 8)
+        max_px_h = max(64, (max(4, term_lines - 3)) * 16)
+        command = [
+            img2sixel,
+            "-w",
+            str(max_px_w),
+            "-h",
+            str(max_px_h),
+            str(image_path),
+        ]
+        try:
+            sys.stdout.write("\x1b[2J\x1b[H")
+            sys.stdout.flush()
+            subprocess.run(command, check=True)
+            sys.stdout.write("\nPress any key to return\n")
+            sys.stdout.flush()
+            return True
+        except Exception as exc:  # pragma: no cover
+            self.logger.debug("Sixel preview unavailable, falling back: %s", exc)
+            return False
+
+    @staticmethod
+    def _render_image_preview_lines(
+        image_path: Path,
+        *,
+        max_cols: int,
+        max_rows: int,
+    ) -> tuple[list[str], tuple[int, int]]:
+        try:
+            from PIL import Image, UnidentifiedImageError
+        except ModuleNotFoundError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Image preview requires Pillow. Re-run ./run.sh to install dependencies."
+            ) from exc
+
+        try:
+            with Image.open(image_path) as opened:
+                image = opened.convert("RGB")
+        except UnidentifiedImageError as exc:
+            raise RuntimeError("Preview supports image media only.") from exc
+
+        original_size = image.size
+        cols = max(4, max_cols)
+        rows = max(2, max_rows)
+        scale = min(cols / image.width, (rows * 2) / image.height, 1.0)
+        target_w = max(1, int(image.width * scale))
+        target_h = max(2, int(image.height * scale))
+        if target_h % 2 == 1:
+            target_h += 1
+
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        image = image.resize((target_w, target_h), resampling)
+        pixels = image.load()
+
+        lines: list[str] = []
+        for y in range(0, target_h, 2):
+            parts: list[str] = []
+            for x in range(target_w):
+                top = pixels[x, y]
+                bottom = pixels[x, y + 1] if y + 1 < target_h else (0, 0, 0)
+                parts.append(
+                    (
+                        f"\x1b[38;2;{top[0]};{top[1]};{top[2]}m"
+                        f"\x1b[48;2;{bottom[0]};{bottom[1]};{bottom[2]}m"
+                        "▀"
+                    )
+                )
+            parts.append("\x1b[0m")
+            lines.append("".join(parts))
+        return lines, original_size
+
+    def _show_image_preview(self, image_path: Path) -> None:
+        cleanup_curses(self.stdscr)
+        try:
+            term_size = shutil.get_terminal_size((80, 24))
+            if self._try_sixel_image_preview(
+                image_path,
+                term_columns=term_size.columns,
+                term_lines=term_size.lines,
+            ):
+                self._read_single_terminal_key()
+                return
+            header = f"Preview: {image_path.name}"
+            footer = "Press any key to return"
+            max_cols = max(8, term_size.columns - 2)
+            max_rows = max(4, term_size.lines - 4)
+            lines, original_size = self._render_image_preview_lines(
+                image_path,
+                max_cols=max_cols,
+                max_rows=max_rows,
+            )
+
+            sys.stdout.write("\x1b[2J\x1b[H")
+            sys.stdout.write(header[: max(1, term_size.columns - 1)] + "\n")
+            sys.stdout.write(
+                f"{original_size[0]}x{original_size[1]} | {footer}"[
+                    : max(1, term_size.columns - 1)
+                ]
+                + "\n"
+            )
+            for line in lines[: max_rows]:
+                sys.stdout.write(line + "\x1b[0m\n")
+            sys.stdout.flush()
+            self._read_single_terminal_key()
+        finally:
+            sys.stdout.write("\x1b[0m\x1b[2J\x1b[H")
+            sys.stdout.flush()
+            self.stdscr = setup_curses()
+            self._init_colors()
+            self.needs_redraw = True
 
     def _cancel_edit_mode(self, *, clear_input: bool = False) -> None:
         if self.editing_msg_id is None:
@@ -1349,17 +1623,15 @@ class TerminalTelegramTUI:
                     raise
                 if attempt < max_attempts:
                     self.logger.debug(
-                        "Transient dialog refresh failure (attempt %s/%s): %s",
+                        "Transient dialog refresh failure (attempt %s/%s)",
                         attempt,
                         max_attempts,
-                        exc,
                     )
                 else:
-                    self.logger.warning(
-                        "Transient dialog refresh failure (attempt %s/%s): %s",
+                    self.logger.info(
+                        "Transient dialog refresh failure (attempt %s/%s)",
                         attempt,
                         max_attempts,
-                        exc,
                     )
                 if attempt >= max_attempts:
                     self.dialog_refresh_failures += 1
@@ -1370,7 +1642,7 @@ class TerminalTelegramTUI:
                     self.dialog_refresh_backoff_until = time.monotonic() + backoff_sec
                     self.last_dialog_refresh = time.monotonic()
                     self.dialog_refresh_requested = True
-                    self.logger.warning(
+                    self.logger.info(
                         "Dialog refresh paused for %.1fs after repeated transient failures",
                         backoff_sec,
                     )
@@ -2097,6 +2369,16 @@ class TerminalTelegramTUI:
             self._request_save_current_editing()
             return
 
+        if (
+            isinstance(key, str)
+            and key == "p"
+            and self.editing_msg_id is not None
+        ):
+            selected = self._entry_by_id(self.editing_msg_id)
+            if selected is not None and selected.has_media:
+                await self._preview_current_editing()
+                return
+
         if key in ("\r", "\n", 13, 10) or key == curses.KEY_ENTER:
             if self.chat_scroll_offset > 0:
                 self.chat_scroll_offset = 0
@@ -2677,6 +2959,7 @@ class TerminalTelegramTUI:
                     guide_parts.append("Enter: save")
                 guide_parts.extend(["^E: older", "^R: newer", "^G: cancel"])
                 if selected is not None and selected.has_media:
+                    guide_parts.append("p: preview")
                     guide_parts.append("^W: save media")
                 if selected is not None and selected.is_me:
                     guide_parts.append("^D: delete")

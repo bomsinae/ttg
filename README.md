@@ -93,6 +93,7 @@ ttg
 - `Ctrl+N`: insert newline
 - `Ctrl+E`: select latest message; press again for older messages
 - `Ctrl+R`: move selection toward newer messages
+- `p`: preview selected image media in the terminal
 - `Ctrl+W`: save media from currently selected message (`Ctrl+E`/`Ctrl+R` selection)
 - `Ctrl+D`: delete currently selected own message (with confirm dialog)
 - `Ctrl+G`: cancel edit mode
@@ -121,3 +122,5 @@ python3 -m py_compile tg_client.py
 
 - Keep `.env` and `.session` private.
 - Many terminals cannot distinguish some modified key combos, so `Ctrl+N` is the reliable newline key.
+- Image preview tries `sixel` first when `img2sixel` is available. Outside `tmux`, `auto` mode now attempts `sixel` by default. Inside `tmux`, it only does so if `tmux` reports `sixel` in the client terminal features; otherwise it falls back to ANSI blocks.
+- Override preview backend with `TTG_IMAGE_PREVIEW_MODE=auto|sixel|ansi`. If your terminal renders garbage, use `ansi`.

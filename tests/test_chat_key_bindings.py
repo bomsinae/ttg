@@ -277,6 +277,30 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(captured.get("output_path"))
         self.assertEqual(captured.get("error_prefix"), "Media save failed")
 
+    async def test_p_previews_selected_media_message(self) -> None:
+        app = make_app()
+        app.chat_entries = [
+            ChatEntry(
+                sender="other",
+                text="<photo>",
+                when=datetime.now(),
+                is_me=False,
+                msg_id=89,
+                has_media=True,
+                is_media=True,
+            ),
+        ]
+        app.editing_msg_id = 89
+        called: list[bool] = []
+
+        async def fake_preview():
+            called.append(True)
+
+        app._preview_current_editing = fake_preview  # type: ignore[assignment]
+
+        await app.handle_chat_key("p")
+        self.assertEqual(called, [True])
+
     async def test_ctrl_e_selects_outgoing_media_message_too(self) -> None:
         app = make_app()
         app.chat_entries = [

@@ -1,9 +1,29 @@
+import logging
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from tg_client import AppConfig, cleanup_log_files, load_app_config, redact_log_text
+from tg_client import (
+    AppConfig,
+    cleanup_log_files,
+    load_app_config,
+    redact_log_text,
+    setup_logging,
+    TerminalTelegramTUI,
+)
+
+
+class DummyStdScr:
+    def getmaxyx(self):
+        return (24, 80)
+
+    def addstr(self, *args, **kwargs):
+        return None
+
+    def move(self, *args, **kwargs):
+        return None
 
 
 class RuntimeToolsTests(unittest.TestCase):
@@ -58,6 +78,74 @@ class RuntimeToolsTests(unittest.TestCase):
             self.assertEqual(config.log_backup_count, 7)
             self.assertFalse(config.log_redact_secrets)
             self.assertFalse(config.log_redact_phone_numbers)
+
+    def test_setup_logging_suppresses_telethon_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig(log_file=str(Path(tmp) / "ttg.log"))
+            logger = setup_logging(config)
+            telethon_logger = logging.getLogger("telethon")
+
+            self.assertIs(logger.handlers[0], telethon_logger.handlers[0])
+            self.assertFalse(telethon_logger.propagate)
+            self.assertEqual(telethon_logger.level, logging.ERROR)
+
+    def test_preview_mode_from_env_accepts_known_values(self) -> None:
+        self.assertEqual(TerminalTelegramTUI._preview_mode_from_env(None), "auto")
+        self.assertEqual(TerminalTelegramTUI._preview_mode_from_env("ansi"), "ansi")
+        self.assertEqual(TerminalTelegramTUI._preview_mode_from_env("sixel"), "sixel")
+        self.assertEqual(TerminalTelegramTUI._preview_mode_from_env("weird"), "auto")
+
+    def test_should_use_sixel_preview_honors_force_mode(self) -> None:
+        app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
+        with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
+            with patch.dict(
+                "os.environ",
+                {"TTG_IMAGE_PREVIEW_MODE": "sixel", "TERM": "tmux-256color"},
+                clear=False,
+            ):
+                self.assertTrue(app._should_use_sixel_preview())
+
+    def test_should_use_sixel_preview_enables_auto_inside_tmux_when_client_reports_sixel(self) -> None:
+        app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
+        with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
+            with patch.object(app, "_tmux_client_supports_sixel", return_value=True):
+                with patch.dict(
+                    "os.environ",
+                    {"TTG_IMAGE_PREVIEW_MODE": "auto", "TERM": "tmux-256color", "TMUX": "1"},
+                    clear=False,
+                ):
+                    self.assertTrue(app._should_use_sixel_preview())
+
+    def test_should_use_sixel_preview_disables_auto_inside_tmux_without_client_sixel(self) -> None:
+        app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
+        with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
+            with patch.object(app, "_tmux_client_supports_sixel", return_value=False):
+                with patch.dict(
+                    "os.environ",
+                    {"TTG_IMAGE_PREVIEW_MODE": "auto", "TERM": "tmux-256color", "TMUX": "1"},
+                    clear=False,
+                ):
+                    self.assertFalse(app._should_use_sixel_preview())
+
+    def test_should_use_sixel_preview_enables_auto_outside_tmux_when_img2sixel_exists(self) -> None:
+        app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
+        with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
+            with patch.dict(
+                "os.environ",
+                {"TTG_IMAGE_PREVIEW_MODE": "auto", "TERM": "xterm-256color", "TMUX": ""},
+                clear=False,
+            ):
+                self.assertTrue(app._should_use_sixel_preview())
+
+    def test_tmux_client_supports_sixel_parses_feature_list(self) -> None:
+        completed = type("Completed", (), {"stdout": "clipboard,sixel,title\n"})()
+        with patch("tg_client.subprocess.run", return_value=completed):
+            self.assertTrue(TerminalTelegramTUI._tmux_client_supports_sixel())
+
+    def test_tmux_client_supports_sixel_returns_false_without_feature(self) -> None:
+        completed = type("Completed", (), {"stdout": "clipboard,title\n"})()
+        with patch("tg_client.subprocess.run", return_value=completed):
+            self.assertFalse(TerminalTelegramTUI._tmux_client_supports_sixel())
 
 
 if __name__ == "__main__":
