@@ -976,20 +976,7 @@ class TerminalTelegramTUI:
         self._set_status(self._selected_entry_status(target))
 
     def _request_save_current_editing(self) -> None:
-        if self.current_dialog is None:
-            self._set_status("No active dialog.")
-            return
-
-        if self.editing_msg_id is None:
-            self._set_status("Select a message first (Ctrl+E/Ctrl+R).")
-            return
-
-        entry = self._entry_by_id(self.editing_msg_id)
-        if entry is None:
-            self._set_status("Selected message is unavailable.")
-            return
-        if not entry.has_media:
-            self._set_status("Selected message has no media.")
+        if self._selected_media_context() is None:
             return
 
         self._request_message_action(
@@ -998,62 +985,33 @@ class TerminalTelegramTUI:
         )
 
     async def _preview_current_editing(self) -> None:
-        if self.current_dialog is None:
-            self._set_status("No active dialog.")
+        context = self._selected_media_context()
+        if context is None:
             return
-
-        if self.editing_msg_id is None:
-            self._set_status("Select a message first (Ctrl+E/Ctrl+R).")
-            return
-
-        entry = self._entry_by_id(self.editing_msg_id)
-        if entry is None:
-            self._set_status("Selected message is unavailable.")
-            return
-        if not entry.has_media:
-            self._set_status("Selected message has no media.")
-            return
-
-        dialog = self.current_dialog
-        msg_id = self.editing_msg_id
+        dialog, msg_id = context
         self._set_status("Preparing media preview...")
         self.draw()
-        try:
-            fetched = await self.client.get_messages(dialog.entity, ids=msg_id)
-        except Exception as exc:  # pragma: no cover
-            self.logger.warning("Preview fetch failed chat=%s msg=%s: %s", dialog.id, msg_id, exc)
-            self._set_status(f"Preview load failed: {exc}")
-            return
-
-        msg: Message | None
-        if isinstance(fetched, list):
-            msg = fetched[0] if fetched else None
-        else:
-            msg = fetched
+        msg = await self._fetch_media_message(
+            dialog,
+            msg_id,
+            log_prefix="Preview fetch failed",
+            status_prefix="Preview load failed",
+        )
         if msg is None:
-            self._set_status("Selected message not found")
-            return
-        if getattr(msg, "media", None) is None:
-            self._set_status("Selected message has no media")
             return
 
         with tempfile.TemporaryDirectory(prefix="ttg-preview-") as tmpdir:
             target = Path(tmpdir)
-            try:
-                saved_path = await self.client.download_media(msg, file=str(target))
-            except Exception as exc:  # pragma: no cover
-                self.logger.warning(
-                    "Preview download failed chat=%s msg=%s target=%s: %s",
-                    dialog.id,
-                    msg_id,
-                    target,
-                    exc,
-                )
-                self._set_status(f"Preview download failed: {exc}")
-                return
-
-            if not saved_path:
-                self._set_status("Preview failed: no output path returned")
+            saved_path = await self._download_media_message(
+                dialog,
+                msg_id,
+                msg,
+                target,
+                log_prefix="Preview download failed",
+                status_prefix="Preview download failed",
+                empty_status="Preview failed: no output path returned",
+            )
+            if saved_path is None:
                 return
 
             try:
@@ -1100,12 +1058,112 @@ class TerminalTelegramTUI:
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
+    def _selected_media_context(self) -> tuple[Dialog, int] | None:
+        if self.current_dialog is None:
+            self._set_status("No active dialog.")
+            return None
+        if self.editing_msg_id is None:
+            self._set_status("Select a message first (Ctrl+E/Ctrl+R).")
+            return None
+
+        entry = self._entry_by_id(self.editing_msg_id)
+        if entry is None:
+            self._set_status("Selected message is unavailable.")
+            return None
+        if not entry.has_media:
+            self._set_status("Selected message has no media.")
+            return None
+        return self.current_dialog, self.editing_msg_id
+
+    @staticmethod
+    def _coerce_message_result(fetched: Any) -> Message | None:
+        if isinstance(fetched, list):
+            return fetched[0] if fetched else None
+        return fetched
+
+    async def _fetch_media_message(
+        self,
+        dialog: Dialog,
+        msg_id: int,
+        *,
+        log_prefix: str,
+        status_prefix: str,
+    ) -> Message | None:
+        try:
+            fetched = await self.client.get_messages(dialog.entity, ids=msg_id)
+        except Exception as exc:  # pragma: no cover
+            self.logger.warning("%s chat=%s msg=%s: %s", log_prefix, dialog.id, msg_id, exc)
+            self._set_status(f"{status_prefix}: {exc}")
+            return None
+
+        msg = self._coerce_message_result(fetched)
+        if msg is None:
+            self._set_status("Selected message not found")
+            return None
+        if getattr(msg, "media", None) is None:
+            self._set_status("Selected message has no media")
+            return None
+        return msg
+
+    async def _download_media_message(
+        self,
+        dialog: Dialog,
+        msg_id: int,
+        msg: Message,
+        target: Path,
+        *,
+        log_prefix: str,
+        status_prefix: str,
+        empty_status: str,
+    ) -> str | None:
+        try:
+            saved_path = await self.client.download_media(msg, file=str(target))
+        except Exception as exc:  # pragma: no cover
+            self.logger.warning(
+                "%s chat=%s msg=%s target=%s: %s",
+                log_prefix,
+                dialog.id,
+                msg_id,
+                target,
+                exc,
+            )
+            self._set_status(f"{status_prefix}: {exc}")
+            return None
+        if not saved_path:
+            self._set_status(empty_status)
+            return None
+        return saved_path
+
+    @staticmethod
+    def _fit_size_within_box(
+        width: int,
+        height: int,
+        max_width: int,
+        max_height: int,
+    ) -> tuple[int, int]:
+        safe_width = max(1, width)
+        safe_height = max(1, height)
+        safe_max_width = max(1, max_width)
+        safe_max_height = max(1, max_height)
+        scale = min(
+            safe_max_width / safe_width,
+            safe_max_height / safe_height,
+            1.0,
+        )
+        return (
+            max(1, int(safe_width * scale)),
+            max(1, int(safe_height * scale)),
+        )
+
     @staticmethod
     def _preview_mode_from_env(raw: str | None) -> str:
         mode = (raw or "auto").strip().lower()
         if mode in {"auto", "ansi", "sixel"}:
             return mode
         return "auto"
+
+    def _preview_backend(self) -> str:
+        return "sixel" if self._should_use_sixel_preview() else "ansi"
 
     def _should_use_sixel_preview(self) -> bool:
         mode = self._preview_mode_from_env(os.getenv("TTG_IMAGE_PREVIEW_MODE"))
@@ -1151,12 +1209,23 @@ class TerminalTelegramTUI:
 
         max_px_w = max(64, (max(8, term_columns - 2)) * 8)
         max_px_h = max(64, (max(4, term_lines - 3)) * 16)
+        try:
+            from PIL import Image
+        except ModuleNotFoundError:  # pragma: no cover
+            return False
+        with Image.open(image_path) as opened:
+            target_w, target_h = self._fit_size_within_box(
+                opened.width,
+                opened.height,
+                max_px_w,
+                max_px_h,
+            )
         command = [
             img2sixel,
             "-w",
-            str(max_px_w),
+            str(target_w),
             "-h",
-            str(max_px_h),
+            str(target_h),
             str(image_path),
         ]
         try:
@@ -1169,6 +1238,35 @@ class TerminalTelegramTUI:
         except Exception as exc:  # pragma: no cover
             self.logger.debug("Sixel preview unavailable, falling back: %s", exc)
             return False
+
+    def _show_ansi_image_preview(
+        self,
+        image_path: Path,
+        *,
+        term_columns: int,
+        term_lines: int,
+    ) -> None:
+        header = f"Preview: {image_path.name}"
+        footer = "Press any key to return"
+        max_cols = max(8, term_columns - 2)
+        max_rows = max(4, term_lines - 4)
+        lines, original_size = self._render_image_preview_lines(
+            image_path,
+            max_cols=max_cols,
+            max_rows=max_rows,
+        )
+
+        sys.stdout.write("\x1b[2J\x1b[H")
+        sys.stdout.write(header[: max(1, term_columns - 1)] + "\n")
+        sys.stdout.write(
+            f"{original_size[0]}x{original_size[1]} | {footer}"[
+                : max(1, term_columns - 1)
+            ]
+            + "\n"
+        )
+        for line in lines[: max_rows]:
+            sys.stdout.write(line + "\x1b[0m\n")
+        sys.stdout.flush()
 
     @staticmethod
     def _render_image_preview_lines(
@@ -1193,9 +1291,12 @@ class TerminalTelegramTUI:
         original_size = image.size
         cols = max(4, max_cols)
         rows = max(2, max_rows)
-        scale = min(cols / image.width, (rows * 2) / image.height, 1.0)
-        target_w = max(1, int(image.width * scale))
-        target_h = max(2, int(image.height * scale))
+        target_w, target_h = TerminalTelegramTUI._fit_size_within_box(
+            image.width,
+            image.height,
+            cols,
+            rows * 2,
+        )
         if target_h % 2 == 1:
             target_h += 1
 
@@ -1224,34 +1325,25 @@ class TerminalTelegramTUI:
         cleanup_curses(self.stdscr)
         try:
             term_size = shutil.get_terminal_size((80, 24))
-            if self._try_sixel_image_preview(
-                image_path,
-                term_columns=term_size.columns,
-                term_lines=term_size.lines,
-            ):
-                self._read_single_terminal_key()
-                return
-            header = f"Preview: {image_path.name}"
-            footer = "Press any key to return"
-            max_cols = max(8, term_size.columns - 2)
-            max_rows = max(4, term_size.lines - 4)
-            lines, original_size = self._render_image_preview_lines(
-                image_path,
-                max_cols=max_cols,
-                max_rows=max_rows,
-            )
-
-            sys.stdout.write("\x1b[2J\x1b[H")
-            sys.stdout.write(header[: max(1, term_size.columns - 1)] + "\n")
-            sys.stdout.write(
-                f"{original_size[0]}x{original_size[1]} | {footer}"[
-                    : max(1, term_size.columns - 1)
-                ]
-                + "\n"
-            )
-            for line in lines[: max_rows]:
-                sys.stdout.write(line + "\x1b[0m\n")
-            sys.stdout.flush()
+            backend = self._preview_backend()
+            if backend == "sixel":
+                shown = self._try_sixel_image_preview(
+                    image_path,
+                    term_columns=term_size.columns,
+                    term_lines=term_size.lines,
+                )
+                if not shown:
+                    self._show_ansi_image_preview(
+                        image_path,
+                        term_columns=term_size.columns,
+                        term_lines=term_size.lines,
+                    )
+            else:
+                self._show_ansi_image_preview(
+                    image_path,
+                    term_columns=term_size.columns,
+                    term_lines=term_size.lines,
+                )
             self._read_single_terminal_key()
         finally:
             sys.stdout.write("\x1b[0m\x1b[2J\x1b[H")
@@ -2034,23 +2126,13 @@ class TerminalTelegramTUI:
             return
 
         dialog = self.current_dialog
-        try:
-            fetched = await self.client.get_messages(dialog.entity, ids=msg_id)
-        except Exception as exc:  # pragma: no cover
-            self.logger.warning("Fetch failed chat=%s msg=%s: %s", dialog.id, msg_id, exc)
-            self._set_status(f"Load message failed: {exc}")
-            return
-
-        msg: Message | None
-        if isinstance(fetched, list):
-            msg = fetched[0] if fetched else None
-        else:
-            msg = fetched
+        msg = await self._fetch_media_message(
+            dialog,
+            msg_id,
+            log_prefix="Fetch failed",
+            status_prefix="Load message failed",
+        )
         if msg is None:
-            self._set_status("Selected message not found")
-            return
-        if getattr(msg, "media", None) is None:
-            self._set_status("Selected message has no media")
             return
 
         target: Path
@@ -2068,21 +2150,16 @@ class TerminalTelegramTUI:
             target.mkdir(parents=True, exist_ok=True)
 
         self._set_status("Downloading selected media...")
-        try:
-            saved_path = await self.client.download_media(msg, file=str(target))
-        except Exception as exc:  # pragma: no cover
-            self.logger.warning(
-                "Media save failed chat=%s msg=%s target=%s: %s",
-                dialog.id,
-                msg_id,
-                target,
-                exc,
-            )
-            self._set_status(f"Media save failed: {exc}")
-            return
-
-        if not saved_path:
-            self._set_status("Media save failed: no output path returned")
+        saved_path = await self._download_media_message(
+            dialog,
+            msg_id,
+            msg,
+            target,
+            log_prefix="Media save failed",
+            status_prefix="Media save failed",
+            empty_status="Media save failed: no output path returned",
+        )
+        if saved_path is None:
             return
         self._set_status(f"Saved media: {saved_path}")
 

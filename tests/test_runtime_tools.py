@@ -95,6 +95,18 @@ class RuntimeToolsTests(unittest.TestCase):
         self.assertEqual(TerminalTelegramTUI._preview_mode_from_env("sixel"), "sixel")
         self.assertEqual(TerminalTelegramTUI._preview_mode_from_env("weird"), "auto")
 
+    def test_fit_size_within_box_preserves_wide_aspect_ratio(self) -> None:
+        self.assertEqual(
+            TerminalTelegramTUI._fit_size_within_box(400, 200, 300, 300),
+            (300, 150),
+        )
+
+    def test_fit_size_within_box_preserves_tall_aspect_ratio(self) -> None:
+        self.assertEqual(
+            TerminalTelegramTUI._fit_size_within_box(200, 400, 300, 300),
+            (150, 300),
+        )
+
     def test_should_use_sixel_preview_honors_force_mode(self) -> None:
         app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
         with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
