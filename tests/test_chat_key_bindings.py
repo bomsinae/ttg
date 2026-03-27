@@ -39,6 +39,26 @@ def make_dialog_app(dialog_count: int = 20) -> TerminalTelegramTUI:
 
 
 class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_media_placeholder_includes_kind_dimensions_size_and_caption(self) -> None:
+        app = make_app()
+        msg = SimpleNamespace(
+            photo=object(),
+            video=None,
+            voice=None,
+            audio=None,
+            sticker=None,
+            gif=None,
+            document=None,
+            message="caption text",
+            file=SimpleNamespace(name="photo.jpg", size=2048, width=1280, height=720),
+            media=object(),
+        )
+
+        text, is_media = app._message_text_and_media_flag(msg)  # type: ignore[arg-type]
+        self.assertTrue(is_media)
+        self.assertIn("[photo - 1280x720 | photo.jpg | 2.0KB]", text)
+        self.assertTrue(text.endswith("caption text"))
+
     async def test_status_suppresses_getdialogs_internal_issue_error(self) -> None:
         app = make_app()
         app._set_status("stable")

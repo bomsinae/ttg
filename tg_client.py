@@ -1809,6 +1809,12 @@ class TerminalTelegramTUI:
         file_obj = getattr(msg, "file", None)
         file_name = (getattr(file_obj, "name", None) or "").strip()
         size_text = self._format_size(getattr(file_obj, "size", None))
+        width = getattr(file_obj, "width", None)
+        height = getattr(file_obj, "height", None)
+        dimensions = ""
+        if isinstance(width, int) and width > 0 and isinstance(height, int) and height > 0:
+            dimensions = f"{width}x{height}"
+        caption = (getattr(msg, "message", None) or "").strip()
 
         if getattr(msg, "photo", None) is not None:
             kind = "photo"
@@ -1827,21 +1833,30 @@ class TerminalTelegramTUI:
         else:
             kind = "media"
 
-        details: list[str] = []
+        details: list[str] = [kind]
+        meta: list[str] = []
+        if dimensions:
+            meta.append(dimensions)
         if file_name:
-            details.append(file_name)
+            meta.append(file_name)
         if size_text:
-            details.append(size_text)
-        if details:
-            return f"<{kind}: {' | '.join(details)}>"
-        return f"<{kind}>"
+            meta.append(size_text)
+        if meta:
+            details.append(" | ".join(meta))
+
+        text = f"[{' - '.join(details)}]"
+        if caption:
+            preview = caption.replace("\n", " ").strip()
+            if preview:
+                return f"{text} {preview}"
+        return text
 
     def _message_text_and_media_flag(self, msg: Message) -> tuple[str, bool]:
+        if getattr(msg, "media", None) is not None:
+            return self._media_placeholder(msg), True
         text = getattr(msg, "message", None)
         if isinstance(text, str) and text != "":
             return text, False
-        if getattr(msg, "media", None) is not None:
-            return self._media_placeholder(msg), True
         return message_text(text), False
 
     def _entry_from_message(self, msg: Message, chat_id: int | None = None) -> ChatEntry:
