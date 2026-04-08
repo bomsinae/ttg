@@ -728,6 +728,82 @@ class DialogKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
             safe_local_time(ts).strftime("%m-%d (%a)"),
         )
 
+    async def test_dialog_preview_includes_read_receipt_for_outgoing_last_message(self) -> None:
+        app = make_dialog_app(dialog_count=0)
+        dialog = SimpleNamespace(
+            id=100,
+            message=SimpleNamespace(
+                id=10,
+                out=True,
+                message="hello",
+                media=None,
+            ),
+        )
+        app.read_outbox_max_by_chat[100] = 10
+
+        preview = app._dialog_preview(dialog, 80)
+        self.assertIn("✓✓", preview)
+        self.assertIn("hello", preview)
+
+    async def test_dialog_preview_includes_single_check_for_unread_outgoing_last_message(self) -> None:
+        app = make_dialog_app(dialog_count=0)
+        dialog = SimpleNamespace(
+            id=100,
+            message=SimpleNamespace(
+                id=11,
+                out=True,
+                message="hello",
+                media=None,
+            ),
+        )
+        app.read_outbox_max_by_chat[100] = 10
+
+        preview = app._dialog_preview(dialog, 80)
+        self.assertIn("✓", preview)
+        self.assertNotIn("✓✓", preview)
+
+    async def test_dialog_preview_includes_sender_name_for_group_chat(self) -> None:
+        app = make_dialog_app(dialog_count=0)
+        dialog = SimpleNamespace(
+            id=100,
+            is_group=True,
+            is_channel=False,
+            entity=SimpleNamespace(megagroup=False),
+            message=SimpleNamespace(
+                id=12,
+                out=False,
+                message="hello",
+                media=None,
+                sender=SimpleNamespace(first_name="Alice", last_name="", username=""),
+                sender_id=55,
+            ),
+        )
+
+        preview = app._dialog_preview(dialog, 80)
+        self.assertIn("Alice:", preview)
+        self.assertIn("hello", preview)
+
+    async def test_dialog_preview_does_not_include_sender_name_for_direct_chat(self) -> None:
+        app = make_dialog_app(dialog_count=0)
+        dialog = SimpleNamespace(
+            id=100,
+            is_group=False,
+            is_channel=False,
+            entity=SimpleNamespace(megagroup=False),
+            message=SimpleNamespace(
+                id=13,
+                out=False,
+                message="hello",
+                media=None,
+                sender=SimpleNamespace(first_name="Alice", last_name="", username=""),
+                sender_id=55,
+            ),
+        )
+
+        preview = app._dialog_preview(dialog, 80)
+        self.assertNotIn("Alice:", preview)
+        self.assertEqual(preview, "hello")
+
     async def test_refresh_dialogs_retries_and_keeps_running_on_transient_errors(self) -> None:
         app = make_dialog_app(dialog_count=1)
         app._set_status("keep")

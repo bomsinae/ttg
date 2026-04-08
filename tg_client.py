@@ -2661,9 +2661,50 @@ class TerminalTelegramTUI:
 
         text = ""
         if dialog.message is not None:
-            text = message_text(getattr(dialog.message, "message", None))
+            text, _ = self._message_text_and_media_flag(dialog.message)
+            receipt = self._dialog_last_message_receipt(dialog)
+            sender_prefix = self._dialog_last_message_sender_prefix(dialog)
+            prefix_parts: list[str] = []
+            if receipt:
+                prefix_parts.append(receipt)
+            if sender_prefix:
+                prefix_parts.append(f"{sender_prefix}:")
+            if prefix_parts:
+                prefix = " ".join(prefix_parts)
+                text = f"{prefix} {text}" if text else prefix
         text = text.replace("\n", " ")
         return ellipsize(text, max_width)
+
+    def _dialog_last_message_sender_prefix(self, dialog: Dialog) -> str:
+        last_msg = getattr(dialog, "message", None)
+        if last_msg is None:
+            return ""
+        if not self._dialog_should_show_sender_prefix(dialog):
+            return ""
+        if getattr(last_msg, "out", False):
+            return "me"
+        sender_id = getattr(last_msg, "sender_id", None)
+        fallback = f"id:{sender_id}" if sender_id is not None else "unknown"
+        return entity_label(getattr(last_msg, "sender", None), fallback=fallback)
+
+    @staticmethod
+    def _dialog_should_show_sender_prefix(dialog: Dialog) -> bool:
+        if bool(getattr(dialog, "is_group", False)):
+            return True
+        entity = getattr(dialog, "entity", None)
+        return bool(
+            getattr(dialog, "is_channel", False) and getattr(entity, "megagroup", False)
+        )
+
+    def _dialog_last_message_receipt(self, dialog: Dialog) -> str:
+        last_msg = getattr(dialog, "message", None)
+        if last_msg is None or not getattr(last_msg, "out", False):
+            return ""
+        msg_id = getattr(last_msg, "id", None)
+        if not isinstance(msg_id, int):
+            return ""
+        read_max = self.read_outbox_max_by_chat.get(dialog.id, 0)
+        return "✓✓" if msg_id <= read_max else "✓"
 
     def _dialog_last_message_time(self, dialog: Dialog) -> str:
         last_msg = getattr(dialog, "message", None)
