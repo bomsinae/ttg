@@ -636,6 +636,83 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.read_outbox_max_by_chat.get(100), None)
         self.assertFalse(app.chat_entries[0].read)
 
+    async def test_on_user_update_sets_typing_status_for_current_chat(self) -> None:
+        app = make_app()
+        app.mode = "chat"
+        app.current_dialog = SimpleNamespace(id=100, name="test", is_group=False, is_channel=False, entity=None)
+        event = SimpleNamespace(
+            chat_id=None,
+            user_id=100,
+            typing=True,
+            recording=False,
+            audio=False,
+            uploading=False,
+            photo=False,
+            video=False,
+            document=False,
+            playing=False,
+            cancel=False,
+            user=None,
+        )
+
+        await app.on_user_update(event)  # type: ignore[arg-type]
+        self.assertEqual(app._current_peer_status_text(), "typing...")
+
+    async def test_on_user_update_in_group_includes_actor_name(self) -> None:
+        app = make_app()
+        app.mode = "chat"
+        app.current_dialog = SimpleNamespace(
+            id=100,
+            name="group",
+            is_group=True,
+            is_channel=False,
+            entity=None,
+        )
+        event = SimpleNamespace(
+            chat_id=100,
+            typing=True,
+            recording=False,
+            audio=False,
+            uploading=False,
+            photo=False,
+            video=False,
+            document=False,
+            playing=False,
+            cancel=False,
+            user=SimpleNamespace(first_name="Alice", last_name="", username="", self=False),
+        )
+
+        await app.on_user_update(event)  # type: ignore[arg-type]
+        self.assertEqual(app._current_peer_status_text(), "Alice typing...")
+
+    async def test_incoming_message_clears_typing_status(self) -> None:
+        app = make_app()
+        app.mode = "chat"
+        app.current_dialog = SimpleNamespace(id=100, name="test")
+        app._set_peer_action("typing...")
+
+        class DummyEvent:
+            chat_id = 100
+            id = 50
+            message = SimpleNamespace(
+                id=50,
+                out=False,
+                message="hello",
+                date=datetime.now(),
+                media=None,
+                sender_id=None,
+                sender=None,
+            )
+
+            async def get_sender(self):
+                return None
+
+            async def get_chat(self):
+                return None
+
+        await app.on_new_message(DummyEvent())
+        self.assertEqual(app.peer_action_text, "")
+
     async def test_on_new_message_other_chat_outgoing_does_not_raise_unread_badge(self) -> None:
         app = make_app()
         app.mode = "chat"

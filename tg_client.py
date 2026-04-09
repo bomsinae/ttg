@@ -569,6 +569,8 @@ class TerminalTelegramTUI:
         )
         self.peer_status_last_refresh = 0.0
         self.peer_status_text = "Status unavailable"
+        self.peer_action_text = ""
+        self.peer_action_until = 0.0
         self.editing_msg_id: int | None = None
         self.delete_confirm_msg_id: int | None = None
         self.draft_by_chat: dict[int, str] = {}
@@ -821,6 +823,60 @@ class TerminalTelegramTUI:
         if getattr(entity, "megagroup", False):
             return "Group"
         return "Chat"
+
+    def _current_peer_status_text(self) -> str:
+        now = time.monotonic()
+        if self.peer_action_text and now < self.peer_action_until:
+            return self.peer_action_text
+        if self.peer_action_text:
+            self.peer_action_text = ""
+            self.peer_action_until = 0.0
+        return self.peer_status_text
+
+    def _set_peer_action(self, text: str, *, duration_sec: float = 5.0) -> None:
+        self.peer_action_text = text.strip()
+        self.peer_action_until = time.monotonic() + max(0.5, duration_sec)
+        self.needs_redraw = True
+
+    def _clear_peer_action(self) -> None:
+        if not self.peer_action_text:
+            return
+        self.peer_action_text = ""
+        self.peer_action_until = 0.0
+        self.needs_redraw = True
+
+    def _should_show_peer_action_actor(self) -> bool:
+        if self.current_dialog is None:
+            return False
+        if bool(getattr(self.current_dialog, "is_group", False)):
+            return True
+        entity = getattr(self.current_dialog, "entity", None)
+        return bool(
+            getattr(self.current_dialog, "is_channel", False)
+            and getattr(entity, "megagroup", False)
+        )
+
+    @staticmethod
+    def _format_user_update_action(event: events.UserUpdate.Event) -> str:
+        if getattr(event, "typing", False):
+            return "typing..."
+        if getattr(event, "recording", False) and getattr(event, "audio", False):
+            return "recording voice..."
+        if getattr(event, "uploading", False) and getattr(event, "photo", False):
+            return "uploading photo..."
+        if getattr(event, "uploading", False) and getattr(event, "video", False):
+            return "uploading video..."
+        if getattr(event, "uploading", False) and getattr(event, "document", False):
+            return "uploading file..."
+        if getattr(event, "playing", False):
+            return "playing game..."
+        if getattr(event, "cancel", False):
+            return ""
+        if getattr(event, "recording", False):
+            return "recording..."
+        if getattr(event, "uploading", False):
+            return "uploading..."
+        return ""
 
     async def refresh_peer_status(self, force: bool = False) -> None:
         if self.current_dialog is None or self.mode != "chat":
@@ -2236,6 +2292,7 @@ class TerminalTelegramTUI:
                 self.chat_entries.append(entry)
             self._rebuild_search_matches(preserve_focus=True)
             if not entry.is_me:
+                self._clear_peer_action()
                 self._schedule_ack_read(self.current_dialog, max_id=event.id)
             self._set_status(
                 f"{self.current_dialog.name} ({self.current_dialog.id}) | Enter: send | Ctrl+N: newline | Esc: dialogs"
@@ -2285,6 +2342,38 @@ class TerminalTelegramTUI:
             self._apply_read_receipts(chat_id)
             self.needs_redraw = True
         self.dialog_refresh_requested = True
+
+    async def on_user_update(self, event: events.UserUpdate.Event) -> None:
+        if self.mode != "chat" or self.current_dialog is None:
+            return
+        chat_id = getattr(event, "chat_id", None)
+        user_id = getattr(event, "user_id", None)
+        current_id = self.current_dialog.id
+        matches_current = False
+        if isinstance(chat_id, int) and chat_id == current_id:
+            matches_current = True
+        elif isinstance(user_id, int) and user_id == current_id:
+            matches_current = True
+        if not matches_current:
+            return
+
+        text = self._format_user_update_action(event)
+        if not text:
+            self._clear_peer_action()
+            return
+
+        if self._should_show_peer_action_actor():
+            user = getattr(event, "user", None)
+            if user is None:
+                try:
+                    user = await event.get_user()
+                except Exception:
+                    user = None
+            if getattr(user, "self", False):
+                return
+            actor = entity_label(user, fallback="Someone")
+            text = f"{actor} {text}"
+        self._set_peer_action(text)
 
     async def handle_dialog_key(self, key: Any) -> None:
         if key == curses.KEY_DOWN:
@@ -3040,7 +3129,7 @@ class TerminalTelegramTUI:
             return
 
         chat_name = str(self.current_dialog.name).replace("\n", " ").strip()
-        title = f"{chat_name} | {self.peer_status_text}"
+        title = f"{chat_name} | {self._current_peer_status_text()}"
         other_alert = self._other_chat_alert_text()
         if other_alert:
             title = f"{title} | {other_alert}"
@@ -3319,6 +3408,7 @@ async def async_main() -> int:
         app = TerminalTelegramTUI(client, stdscr, config=config, logger=logger)
         client.add_event_handler(app.on_new_message, events.NewMessage())
         client.add_event_handler(app.on_message_read, events.MessageRead())
+        client.add_event_handler(app.on_user_update, events.UserUpdate())
         await app.run()
     finally:
         cleanup_curses(stdscr)
