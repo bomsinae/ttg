@@ -1611,7 +1611,7 @@ class TerminalTelegramTUI:
             self.needs_redraw = True
 
     def _selected_dialog_id(self) -> int | None:
-        if self.current_dialog is not None:
+        if self.mode == "chat" and self.current_dialog is not None:
             return self.current_dialog.id
         if 0 <= self.selected_idx < len(self.dialogs):
             return self.dialogs[self.selected_idx].id

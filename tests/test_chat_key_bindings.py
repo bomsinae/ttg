@@ -804,6 +804,14 @@ class DialogKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Alice:", preview)
         self.assertEqual(preview, "hello")
 
+    async def test_selected_dialog_id_uses_cursor_in_dialog_mode(self) -> None:
+        app = make_dialog_app(dialog_count=3)
+        app.mode = "dialogs"
+        app.current_dialog = SimpleNamespace(id=0, name="stale")
+        app.selected_idx = 2
+
+        self.assertEqual(app._selected_dialog_id(), 2)
+
     async def test_refresh_dialogs_retries_and_keeps_running_on_transient_errors(self) -> None:
         app = make_dialog_app(dialog_count=1)
         app._set_status("keep")
