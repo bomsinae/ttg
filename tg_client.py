@@ -829,9 +829,14 @@ class TerminalTelegramTUI:
         if self.peer_action_text and now < self.peer_action_until:
             return self.peer_action_text
         if self.peer_action_text:
-            self.peer_action_text = ""
-            self.peer_action_until = 0.0
+            self._clear_peer_action()
         return self.peer_status_text
+
+    def _peer_action_expired(self, now: float | None = None) -> bool:
+        if not self.peer_action_text:
+            return False
+        current = time.monotonic() if now is None else now
+        return current >= self.peer_action_until
 
     def _set_peer_action(self, text: str, *, duration_sec: float = 5.0) -> None:
         self.peer_action_text = text.strip()
@@ -2014,6 +2019,7 @@ class TerminalTelegramTUI:
         self.chat_entries = []
         self.peer_status_text = "Loading peer status..."
         self.peer_status_last_refresh = 0.0
+        self._clear_peer_action()
         self._set_status(f"Opening {dialog.name} ...")
 
         messages = await self.client.get_messages(
@@ -3299,6 +3305,8 @@ class TerminalTelegramTUI:
             await self.handle_input()
 
             now = time.monotonic()
+            if self._peer_action_expired(now):
+                self._clear_peer_action()
             if now - self.last_dialog_refresh >= self.auto_refresh_interval:
                 self.dialog_refresh_requested = True
                 if self.mode == "chat":

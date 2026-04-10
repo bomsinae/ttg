@@ -713,6 +713,28 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         await app.on_new_message(DummyEvent())
         self.assertEqual(app.peer_action_text, "")
 
+    async def test_open_selected_dialog_clears_stale_peer_action(self) -> None:
+        app = make_dialog_app(dialog_count=1)
+        app.client = SimpleNamespace(
+            get_messages=self._async_return([]),
+        )  # type: ignore[assignment]
+        app.dialogs = [SimpleNamespace(id=100, name="chat", entity=object(), unread_count=0)]
+        app.selected_idx = 0
+        app.peer_action_text = "typing..."
+        app.peer_action_until = time.monotonic() + 10
+        app._request_peer_status_refresh = lambda force=False: None  # type: ignore[assignment]
+        app._schedule_ack_read = lambda dialog, max_id=None: None  # type: ignore[assignment]
+
+        await app.open_selected_dialog()
+        self.assertEqual(app.peer_action_text, "")
+
+    @staticmethod
+    def _async_return(value):
+        async def _inner(*args, **kwargs):
+            return value
+
+        return _inner
+
     async def test_on_new_message_other_chat_outgoing_does_not_raise_unread_badge(self) -> None:
         app = make_app()
         app.mode = "chat"
