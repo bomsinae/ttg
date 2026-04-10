@@ -1,3 +1,4 @@
+import subprocess
 import logging
 import json
 import tempfile
@@ -139,7 +140,7 @@ class RuntimeToolsTests(unittest.TestCase):
                 ):
                     self.assertFalse(app._should_use_sixel_preview())
 
-    def test_should_use_sixel_preview_enables_auto_outside_tmux_when_img2sixel_exists(self) -> None:
+    def test_should_use_sixel_preview_enables_auto_outside_tmux_for_xterm(self) -> None:
         app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
         with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
             with patch.dict(
@@ -148,6 +149,53 @@ class RuntimeToolsTests(unittest.TestCase):
                 clear=False,
             ):
                 self.assertTrue(app._should_use_sixel_preview())
+
+    def test_should_use_sixel_preview_enables_auto_outside_tmux_with_windows_terminal_hint(self) -> None:
+        app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
+        with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
+            with patch.dict(
+                "os.environ",
+                {"TTG_IMAGE_PREVIEW_MODE": "auto", "TERM": "xterm-256color", "TMUX": "", "WT_SESSION": "1"},
+                clear=False,
+            ):
+                self.assertTrue(app._should_use_sixel_preview())
+
+    def test_should_use_sixel_preview_enables_auto_outside_tmux_with_sixel_term(self) -> None:
+        app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
+        with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
+            with patch.dict(
+                "os.environ",
+                {"TTG_IMAGE_PREVIEW_MODE": "auto", "TERM": "xterm-sixel", "TMUX": ""},
+                clear=False,
+            ):
+                self.assertTrue(app._should_use_sixel_preview())
+
+    def test_should_use_sixel_preview_disables_auto_for_dumb_term(self) -> None:
+        app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
+        with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
+            with patch.dict(
+                "os.environ",
+                {"TTG_IMAGE_PREVIEW_MODE": "auto", "TERM": "dumb", "TMUX": ""},
+                clear=False,
+            ):
+                self.assertFalse(app._should_use_sixel_preview())
+
+    def test_try_sixel_image_preview_suppresses_stderr(self) -> None:
+        app = TerminalTelegramTUI(client=object(), stdscr=DummyStdScr())
+        with patch.object(app, "_should_use_sixel_preview", return_value=True):
+            with patch("tg_client.shutil.which", return_value="/usr/bin/img2sixel"):
+                with patch("tg_client.subprocess.run") as run_mock:
+                    with patch("PIL.Image.open") as image_open:
+                        fake_image = type("FakeImage", (), {"width": 100, "height": 50})()
+                        image_open.return_value.__enter__.return_value = fake_image
+                        self.assertTrue(
+                            app._try_sixel_image_preview(
+                                Path("/tmp/a.png"),
+                                term_columns=80,
+                                term_lines=24,
+                            )
+                        )
+        self.assertIs(run_mock.call_args.kwargs["stderr"], subprocess.DEVNULL)
 
     def test_tmux_client_supports_sixel_parses_feature_list(self) -> None:
         completed = type("Completed", (), {"stdout": "clipboard,sixel,title\n"})()
@@ -158,6 +206,18 @@ class RuntimeToolsTests(unittest.TestCase):
         completed = type("Completed", (), {"stdout": "clipboard,title\n"})()
         with patch("tg_client.subprocess.run", return_value=completed):
             self.assertFalse(TerminalTelegramTUI._tmux_client_supports_sixel())
+
+    def test_tmux_passthrough_enabled_parses_on_value(self) -> None:
+        completed = type("Completed", (), {"stdout": "on\n"})()
+        with patch("tg_client.subprocess.run", return_value=completed):
+            self.assertTrue(TerminalTelegramTUI._tmux_passthrough_enabled())
+
+    def test_tmux_wrap_passthrough_wraps_and_escapes(self) -> None:
+        payload = b"\x1bPqabc\x1b\\"
+        wrapped = TerminalTelegramTUI._tmux_wrap_passthrough(payload)
+        self.assertTrue(wrapped.startswith(b"\x1bPtmux;"))
+        self.assertTrue(wrapped.endswith(b"\x1b\\"))
+        self.assertIn(b"\x1b\x1bPqabc\x1b\x1b\\", wrapped)
 
 
 if __name__ == "__main__":

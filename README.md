@@ -86,15 +86,13 @@ ttg
 - `r`: refresh dialogs (from dialog list)
 - Chat input area has 2 lines
 - Left / Right: move cursor inside the input box
-- Up / Down: scroll chat history
+- Up / Down: select messages in chat view
 - PageUp / PageDown: scroll chat by one page
-- Reaching the top and continuing Up loads older history automatically
+- Reaching the top and continuing PageUp loads older history automatically
 - `Enter`: if scrolled up, jump to bottom first; otherwise send message
 - `Ctrl+N`: insert newline
-- `Ctrl+E`: select latest message; press again for older messages
-- `Ctrl+R`: move selection toward newer messages
 - `p`: preview selected image media in the terminal
-- `Ctrl+W`: save media from currently selected message (`Ctrl+E`/`Ctrl+R` selection)
+- `Ctrl+W`: save media from currently selected message
 - `Ctrl+D`: delete currently selected own message (with confirm dialog)
 - `Ctrl+G`: cancel edit mode
 - `/s <query>`: start search and jump to latest match
@@ -220,8 +218,8 @@ ttg
 - 위쪽 끝까지 올린 상태에서 계속 `Up` 을 누르면 이전 메시지를 더 불러옵니다.
 - `Enter`: 위로 스크롤된 상태면 먼저 맨 아래로 이동, 아니면 메시지 전송
 - `Ctrl+N`: 줄바꿈
-- `Ctrl+E`: 가장 최근 메시지부터 선택, 한 번 더 누르면 더 오래된 메시지 선택
-- `Ctrl+R`: 더 최신 메시지 쪽으로 이동
+- `Up` / `Down`: 채팅창에서 메시지 선택
+- `PageUp` / `PageDown`: 채팅 내용 스크롤
 - `p`: 선택한 이미지 메시지를 터미널에서 미리보기
 - `Ctrl+W`: 선택한 미디어 메시지 저장
 - `Ctrl+D`: 내가 보낸 선택 메시지 삭제(확인 대화상자 포함)

@@ -129,27 +129,21 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app.editing_msg_id)
         self.assertIsNone(app.delete_confirm_msg_id)
 
-    async def test_key_up_requests_older_history_when_reaching_top(self) -> None:
+    async def test_key_up_selects_older_message(self) -> None:
         app = make_app()
-        app.chat_scroll_offset = 0
-        app._chat_max_scroll = lambda: 1  # type: ignore[assignment]
-        called: list[bool] = []
-        app._request_load_older_history = lambda: called.append(True)  # type: ignore[assignment]
+        calls: list[bool] = []
+        app._cycle_message_selection = lambda *, older: calls.append(older)  # type: ignore[assignment]
 
         await app.handle_chat_key(curses.KEY_UP)
-        self.assertEqual(app.chat_scroll_offset, 1)
-        self.assertEqual(called, [True])
+        self.assertEqual(calls, [True])
 
-    async def test_key_up_does_not_request_older_history_when_not_at_top(self) -> None:
+    async def test_key_down_selects_newer_message(self) -> None:
         app = make_app()
-        app.chat_scroll_offset = 0
-        app._chat_max_scroll = lambda: 10  # type: ignore[assignment]
-        called: list[bool] = []
-        app._request_load_older_history = lambda: called.append(True)  # type: ignore[assignment]
+        calls: list[bool] = []
+        app._cycle_message_selection = lambda *, older: calls.append(older)  # type: ignore[assignment]
 
-        await app.handle_chat_key(curses.KEY_UP)
-        self.assertEqual(app.chat_scroll_offset, 1)
-        self.assertEqual(called, [])
+        await app.handle_chat_key(curses.KEY_DOWN)
+        self.assertEqual(calls, [False])
 
     async def test_page_up_scrolls_by_body_height_and_requests_history_at_top(self) -> None:
         app = make_app()
@@ -321,7 +315,7 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_chat_key("p")
         self.assertEqual(called, [True])
 
-    async def test_ctrl_e_selects_outgoing_media_message_too(self) -> None:
+    async def test_key_up_selects_outgoing_media_message_too(self) -> None:
         app = make_app()
         app.chat_entries = [
             ChatEntry(
@@ -335,10 +329,10 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
             ),
         ]
 
-        await app.handle_chat_key("\x05")  # Ctrl+E
+        await app.handle_chat_key(curses.KEY_UP)
         self.assertEqual(app.editing_msg_id, 77)
 
-    async def test_ctrl_e_can_select_incoming_message(self) -> None:
+    async def test_key_up_can_select_incoming_message(self) -> None:
         app = make_app()
         app.input_buffer = "draft text"
         app.input_cursor = len(app.input_buffer)
@@ -359,7 +353,7 @@ class ChatKeyBindingsTests(unittest.IsolatedAsyncioTestCase):
             ),
         ]
 
-        await app.handle_chat_key("\x05")  # Ctrl+E
+        await app.handle_chat_key(curses.KEY_UP)
         self.assertEqual(app.editing_msg_id, 11)
         self.assertEqual(app.status, "Selected message (read-only)")
         self.assertEqual(app.input_buffer, "draft text")

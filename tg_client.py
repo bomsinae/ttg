@@ -132,8 +132,6 @@ class AppConfig:
     history_batch_size: int = 80
     key_newline: str = "ctrl+n"
     key_search_prev: str = "ctrl+p"
-    key_edit_older: str = "ctrl+e"
-    key_edit_newer: str = "ctrl+r"
     key_cancel_edit: str = "ctrl+g"
     key_delete_selected: str = "ctrl+d"
     key_save_selected: str = "ctrl+w"
@@ -202,10 +200,6 @@ def load_app_config(path: Path | None = None) -> AppConfig:
         config.key_newline = keys["newline"]
     if isinstance(keys.get("search_prev"), str):
         config.key_search_prev = keys["search_prev"]
-    if isinstance(keys.get("edit_older"), str):
-        config.key_edit_older = keys["edit_older"]
-    if isinstance(keys.get("edit_newer"), str):
-        config.key_edit_newer = keys["edit_newer"]
     if isinstance(keys.get("cancel_edit"), str):
         config.key_cancel_edit = keys["cancel_edit"]
     if isinstance(keys.get("delete_selected"), str):
@@ -553,6 +547,7 @@ class TerminalTelegramTUI:
         self.info_bar_attr = curses.A_REVERSE
         self.badge_unread_attr = curses.A_BOLD
         self.badge_muted_attr = curses.A_DIM
+        self.selected_chat_attr = curses.A_BOLD
         self.read_outbox_max_by_chat: dict[int, int] = {}
         self.refresh_task: asyncio.Task[Any] | None = None
         self.open_task: asyncio.Task[Any] | None = None
@@ -591,14 +586,6 @@ class TerminalTelegramTUI:
         self.key_search_prev = parse_key_binding(
             self.config.key_search_prev,
             control_char("p"),
-        )
-        self.key_edit_older = parse_key_binding(
-            self.config.key_edit_older,
-            control_char("e"),
-        )
-        self.key_edit_newer = parse_key_binding(
-            self.config.key_edit_newer,
-            control_char("r"),
         )
         self.key_cancel_edit = parse_key_binding(
             self.config.key_cancel_edit,
@@ -640,10 +627,16 @@ class TerminalTelegramTUI:
                 self.badge_muted_attr = curses.color_pair(4) | curses.A_DIM
             except curses.error:
                 self.badge_muted_attr = curses.A_DIM
+            try:
+                curses.init_pair(5, curses.COLOR_YELLOW, -1)
+                self.selected_chat_attr = curses.color_pair(5) | curses.A_BOLD
+            except curses.error:
+                self.selected_chat_attr = curses.A_BOLD
         except curses.error:
             self.info_bar_attr = curses.A_REVERSE
             self.badge_unread_attr = curses.A_BOLD
             self.badge_muted_attr = curses.A_DIM
+            self.selected_chat_attr = curses.A_BOLD
 
     def _set_status(self, value: str) -> None:
         cleaned = value.replace("\n", " ").strip()
@@ -1124,7 +1117,7 @@ class TerminalTelegramTUI:
             self._set_status("No active dialog.")
             return None
         if self.editing_msg_id is None:
-            self._set_status("Select a message first (Ctrl+E/Ctrl+R).")
+            self._set_status("Select a message first (Up/Down).")
             return None
 
         entry = self._entry_by_id(self.editing_msg_id)
@@ -1238,7 +1231,11 @@ class TerminalTelegramTUI:
         term = os.getenv("TERM", "").lower()
         if os.getenv("TMUX") or "tmux" in term:
             return self._tmux_client_supports_sixel()
-        return True
+        if "sixel" in term:
+            return True
+        if os.getenv("WT_SESSION"):
+            return True
+        return term not in {"", "dumb", "linux", "vt100"}
 
     @staticmethod
     def _tmux_client_supports_sixel() -> bool:
@@ -1253,6 +1250,24 @@ class TerminalTelegramTUI:
             return False
         features = (result.stdout or "").strip().lower()
         return "sixel" in features.split(",")
+
+    @staticmethod
+    def _tmux_passthrough_enabled() -> bool:
+        try:
+            result = subprocess.run(
+                ["tmux", "show", "-gv", "allow-passthrough"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return False
+        value = (result.stdout or "").strip().lower()
+        return value in {"on", "all"}
+
+    @staticmethod
+    def _tmux_wrap_passthrough(payload: bytes) -> bytes:
+        return b"\x1bPtmux;" + payload.replace(b"\x1b", b"\x1b\x1b") + b"\x1b\\"
 
     def _try_sixel_image_preview(
         self,
@@ -1292,7 +1307,21 @@ class TerminalTelegramTUI:
         try:
             sys.stdout.write("\x1b[2J\x1b[H")
             sys.stdout.flush()
-            subprocess.run(command, check=True)
+            if os.getenv("TMUX") and self._tmux_passthrough_enabled():
+                result = subprocess.run(
+                    command,
+                    check=True,
+                    stderr=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                )
+                output = getattr(result, "stdout", b"") or b""
+                if not output:
+                    return False
+                stream = getattr(sys.stdout, "buffer", sys.stdout)
+                stream.write(self._tmux_wrap_passthrough(output))
+                stream.flush()
+            else:
+                subprocess.run(command, check=True, stderr=subprocess.DEVNULL)
             sys.stdout.write("\nPress any key to return\n")
             sys.stdout.flush()
             return True
@@ -1592,7 +1621,7 @@ class TerminalTelegramTUI:
             return
 
         if self.editing_msg_id is None:
-            self._set_status("Select a message first (Ctrl+E/Ctrl+R).")
+            self._set_status("Select a message first (Up/Down).")
             return
 
         entry = self._entry_by_id(self.editing_msg_id)
@@ -2455,16 +2484,11 @@ class TerminalTelegramTUI:
             return
 
         if key == curses.KEY_UP:
-            self.chat_scroll_offset += 1
-            if self.chat_scroll_offset >= self._chat_max_scroll():
-                self._request_load_older_history()
-            self.needs_redraw = True
+            self._cycle_message_selection(older=True)
             return
 
         if key == curses.KEY_DOWN:
-            if self.chat_scroll_offset > 0:
-                self.chat_scroll_offset -= 1
-            self.needs_redraw = True
+            self._cycle_message_selection(older=False)
             return
 
         if key == curses.KEY_PPAGE:
@@ -2534,14 +2558,6 @@ class TerminalTelegramTUI:
                 and not self.input_buffer
             ):
                 self._move_search(older=False)
-            return
-
-        if key == self.key_edit_older:
-            self._cycle_message_selection(older=True)
-            return
-
-        if key == self.key_edit_newer:
-            self._cycle_message_selection(older=False)
             return
 
         if key == self.key_cancel_edit:
@@ -3171,7 +3187,7 @@ class TerminalTelegramTUI:
         start = max(0, end - body_height)
         visible = lines[start:end]
         for idx, (line, is_me, is_selected, _) in enumerate(visible):
-            attr = curses.A_BOLD if is_selected else 0
+            attr = self.selected_chat_attr if is_selected else 0
             x = 0
             if is_me:
                 content_width = max(1, width - 1)
@@ -3185,7 +3201,7 @@ class TerminalTelegramTUI:
                 guide_parts = ["SELECT"]
                 if selected is not None and selected.is_me and not selected.is_media:
                     guide_parts.append("Enter: save")
-                guide_parts.extend(["^E: older", "^R: newer", "^G: cancel"])
+                guide_parts.extend(["Up: older", "Down: newer", "^G: cancel"])
                 if selected is not None and selected.has_media:
                     guide_parts.append("p: preview")
                     guide_parts.append("^W: save media")
@@ -3207,13 +3223,13 @@ class TerminalTelegramTUI:
             else:
                 if self.chat_scroll_offset > 0:
                     guide = (
-                        "Enter: bottom | "
-                        "^E: Select Message | /s <query>"
+                        "PgUp/PgDn: scroll | "
+                        "Up/Down: select"
                     )
                 else:
                     guide = (
                         "^N: newline | "
-                        "^E: Select Message | /s <query>"
+                        "Up/Down: select | /s <query>"
                     )
 
             status_text = self.status.strip()
